@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { saveActivityToSheet } from "./cloud";
-import { saveActivityToSheet, fetchLeaderboardFromSheet } from "./cloud";
+// import { saveActivityToSheet, fetchLeaderboardFromSheet } from "./cloud";
 
 
 /**
@@ -55,6 +55,7 @@ const makeFreshState = (name = "") => ({
 /* -------------------- Local Storage (multi-user) -------------------- */
 const STORAGE_PREFIX = "sm-productivity-game:v2:";
 const PROFILES_KEY = STORAGE_PREFIX + "profiles"; // string[]
+const SHARED_SECRET = 'YOUR_SUPER_SECRET';
 
 function loadProfiles() {
   try {
