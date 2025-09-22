@@ -1,5 +1,6 @@
 // src/cloud.js
 const ENDPOINT = "https://script.google.com/macros/s/AKfycbyiuh4wLlxOT8g_El6wUtdd5JFwH-qGbq5bWS_fUf20jNK69Brm-b4lUhF4CR_hhm-UYQ/exec";
+const SHARED_SECRET = 'CHANGE_ME_very_secret';
 
 // Save a single activity row
 export async function saveActivityToSheet({ name, date, title, category, points, timestamp }) {
