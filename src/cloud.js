@@ -1,31 +1,44 @@
 // src/cloud.js
-const ENDPOINT = "https://script.google.com/macros/s/AKfycbyiuh4wLlxOT8g_El6wUtdd5JFwH-qGbq5bWS_fUf20jNK69Brm-b4lUhF4CR_hhm-UYQ/exec";
-const SHARED_SECRET = 'CHANGE_ME_very_secret';
+// Small helper used by the React app to talk to your Apps Script backend.
 
-// Save a single activity row
+export const ENDPOINT = "https://script.google.com/macros/s/AKfycbyiuh4wLlxOT8g_El6wUtdd5JFwH-qGbq5bWS_fUf20jNK69Brm-b4lUhF4CR_hhm-UYQ/exec";
+// ^^^ Replace if you re-deploy and the URL changes.
+
+export const SHARED_SECRET = "CHANGE_ME_very_secret";
+// ^^^ MUST match SHARED_SECRET in Code.gs
+
+/** Save a single activity to the Google Sheet (fire-and-forget). */
 export async function saveActivityToSheet({ name, date, title, category, points, timestamp }) {
   try {
-    const res = await fetch(ENDPOINT, {
+    await fetch(`${ENDPOINT}?secret=${encodeURIComponent(SHARED_SECRET)}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name, date, title, category, points, timestamp }),
+      body: JSON.stringify({
+        name,
+        date,
+        title,
+        category: category || "",
+        points: Number(points || 0),
+        timestamp: timestamp || Date.now()
+      })
     });
-    const json = await res.json();
-    if (!json.ok) console.warn("Sheet save failed:", json);
-    return json;
-  } catch (e) {
-    console.error("Save to Google Sheet failed:", e);
+  } catch (err) {
+    // Non-blocking: we still keep everything locally.
+    console.warn("saveActivityToSheet failed:", err);
   }
 }
 
-// Fetch leaderboard from the Sheet
+/** Get leaderboard (last N days). Returns [] on failure. */
 export async function fetchLeaderboardFromSheet(days = 7) {
   try {
-    const res = await fetch(`${ENDPOINT}?action=leaderboard&days=${days}`);
+    const res = await fetch(`${ENDPOINT}?action=leaderboard&days=${encodeURIComponent(days)}`, {
+      method: "GET",
+      headers: { "Content-Type": "application/json" }
+    });
     const json = await res.json();
-    return json.ok ? json.leaderboard : [];
-  } catch (e) {
-    console.error("Fetch leaderboard failed:", e);
+    return json && json.ok && Array.isArray(json.leaderboard) ? json.leaderboard : [];
+  } catch (err) {
+    console.warn("fetchLeaderboardFromSheet failed:", err);
     return [];
   }
 }
