@@ -1,10 +1,10 @@
 // src/cloud.js
 // Small helper used by the React app to talk to your Apps Script backend.
 
-export const ENDPOINT = "https://script.google.com/macros/s/AKfycbyiuh4wLlxOT8g_El6wUtdd5JFwH-qGbq5bWS_fUf20jNK69Brm-b4lUhF4CR_hhm-UYQ/exec";
-// ^^^ Replace if you re-deploy and the URL changes.
+export const ENDPOINT = "https://script.google.com/macros/s/AKfycbwGLevarq_HPKgAcMSC-H3SuLTISAVvL6CLTAPp-73ottc0qW_r1hj2tcCm1chu5Dy_XQ/exec";
+// ^^^ Your new Apps Script URL
 
-export const SHARED_SECRET = "CHANGE_ME_very_secret";
+export const SHARED_SECRET = "my_super_secret_sales_game_2024!";
 // ^^^ MUST match SHARED_SECRET in Code.gs
 
 /** Save a single activity to the Google Sheet (fire-and-forget). */
