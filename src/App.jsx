@@ -415,6 +415,86 @@ function Leaderboard({ profiles }) {
     </div>
   );
 }
+/** Google Apps Script — Web App backend for TAP-HR game **/
+const SHEET_NAME = 'activities';
+const CORS_ORIGIN = '*'; // or set to your site like "https://taphr-game.netlify.app"
+const SHARED_SECRET = 'CHANGE_ME_very_secret'; // simple shared key
+
+function _sheet() {
+  return SpreadsheetApp.getActive().getSheetByName(SHEET_NAME);
+}
+
+function _corsHeaders() {
+  return {
+    'Access-Control-Allow-Origin': CORS_ORIGIN,
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type'
+  };
+}
+
+function doOptions() {
+  return ContentService.createTextOutput('')
+    .setMimeType(ContentService.MimeType.TEXT)
+    .setHeaders(_corsHeaders());
+}
+
+function doPost(e) {
+  if (!e || !e.postData || !e.postData.contents) return _json({ ok:false, error:'no body' }, 400);
+  const secret = (e.parameter && e.parameter.secret) || '';
+  if (secret !== SHARED_SECRET) return _json({ ok:false, error:'unauthorized' }, 401);
+
+  let data;
+  try { data = JSON.parse(e.postData.contents); } catch { return _json({ ok:false, error:'invalid json' }, 400); }
+  const { name='Anon', date, title, category='', points=0, timestamp=Date.now() } = data;
+
+  const sh = _sheet();
+  sh.appendRow([new Date(timestamp), name, date, title, category, Number(points)]);
+  return _json({ ok:true });
+}
+
+function doGet(e) {
+  const params = e && e.parameter ? e.parameter : {};
+  const action = params.action || 'leaderboard';
+  const days = Math.max(1, Math.min(365, Number(params.days || 7)));
+
+  if (action === 'leaderboard') {
+    const sh = _sheet();
+    const rows = sh.getDataRange().getValues(); // includes header
+    const header = rows.shift();
+    const idx = { timestamp:0, name:1, date:2, title:3, category:4, points:5 };
+
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - days);
+    const cutoffISO = cutoff.toISOString().slice(0,10);
+
+    const totals = {};
+    rows.forEach(r => {
+      const date = typeof r[idx.date] === 'string' ? r[idx.date] : Utilities.formatDate(new Date(r[idx.timestamp]), Session.getScriptTimeZone(), 'yyyy-MM-dd');
+      if (date >= cutoffISO) {
+        const name = r[idx.name] || 'Anon';
+        const pts = Number(r[idx.points] || 0);
+        totals[name] = (totals[name] || 0) + pts;
+      }
+    });
+
+    const out = Object.keys(totals)
+      .map(n => ({ name:n, points: totals[n] }))
+      .sort((a,b)=>b.points-a.points);
+
+    return _json({ ok:true, range: days, leaderboard: out });
+  }
+
+  return _json({ ok:false, error:'unknown action' }, 400);
+}
+
+function _json(obj, code=200) {
+  const output = ContentService.createTextOutput(JSON.stringify(obj))
+    .setMimeType(ContentService.MimeType.JSON);
+  const headers = _corsHeaders();
+  const resp = output.setHeaders(headers);
+  // Apps Script can't set status code directly per se, but this is fine for most uses.
+  return resp;
+}
 
 /* -------------------- MAIN APP -------------------- */
 export default function App() {
