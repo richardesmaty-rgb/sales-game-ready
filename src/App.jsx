@@ -1,7 +1,8 @@
 import React, { useEffect, useMemo, useState } from "react";
+import { saveActivityToSheet } from "./cloud";
 
 /**
- * Sales & Marketing Productivity Game — Single-file React App (Multi-user + Leaderboard)
+ * Sales & Marketing Productivity Game — Multi-user + Local Leaderboard
  * - Multiple users (profiles stored locally)
  * - Per-person progress, streaks, levels, history, settings
  * - Local leaderboard (last 7 / 30 days) across all profiles
@@ -14,7 +15,7 @@ import React, { useEffect, useMemo, useState } from "react";
 const todayISO = () => new Date().toISOString().slice(0, 10);
 const clamp = (n, min, max) => Math.max(min, Math.min(max, n));
 const uid = () => Math.random().toString(36).slice(2, 9);
-const xpForLevel = (level) => 100 + (level - 1) * 75; // Level curve
+const xpForLevel = (level) => 100 + (level - 1) * 75;
 
 /* -------------------- Defaults -------------------- */
 const defaultQuests = [
@@ -37,10 +38,10 @@ const defaultSettings = {
 };
 
 const makeFreshState = (name = "") => ({
-  name, // person’s display name
+  name,
   settings: { ...defaultSettings },
   quests: defaultQuests,
-  history: [], // {id, date, questId, title, points, emoji, timestamp}
+  history: [], // {id,date,questId,title,category,points,emoji,timestamp}
   xp: 0,
   level: 1,
   streak: 0,
@@ -228,6 +229,8 @@ function QuestCard({ quest, onComplete, onEdit, onDelete }) {
     </div>
   );
 }
+
+/* -------------------- Quest Editor -------------------- */
 function QuestEditor({ initial, onSave, onCancel }) {
   const [title, setTitle] = useState(initial?.title || "");
   const [points, setPoints] = useState(initial?.points || 5);
@@ -307,6 +310,7 @@ function Badges({ allHistory, level, dailyGoal }) {
     { id: 'level5', label: 'Level 5+', earned: level >= 5, emoji: '🏅' },
     { id: 'goal100', label: 'Hit 100+ day', earned: dailyGoal >= 100, emoji: '💯' },
   ];
+
   return (
     <div className="p-4 rounded-2xl border shadow-sm bg-white/60">
       <h3 className="font-semibold mb-2">Badges</h3>
@@ -366,9 +370,10 @@ function Timer({ settings }) {
   );
 }
 
-/* -------------------- Leaderboard (local, across profiles) -------------------- */
+/* -------------------- Leaderboard (local) -------------------- */
 function Leaderboard({ profiles }) {
   const [range, setRange] = useState("week"); // week | month
+
   const rows = useMemo(() => {
     const now = new Date();
     const start = new Date(now);
@@ -376,7 +381,6 @@ function Leaderboard({ profiles }) {
     else start.setMonth(now.getMonth() - 1);
     const startISO = start.toISOString().slice(0, 10);
 
-    // Sum per person
     const totals = profiles.map((p) => {
       const s = loadPersonState(p);
       const pts = (s.history || [])
@@ -415,86 +419,6 @@ function Leaderboard({ profiles }) {
     </div>
   );
 }
-/** Google Apps Script — Web App backend for TAP-HR game **/
-const SHEET_NAME = 'activities';
-const CORS_ORIGIN = '*'; // or set to your site like "https://taphr-game.netlify.app"
-const SHARED_SECRET = 'CHANGE_ME_very_secret'; // simple shared key
-
-function _sheet() {
-  return SpreadsheetApp.getActive().getSheetByName(SHEET_NAME);
-}
-
-function _corsHeaders() {
-  return {
-    'Access-Control-Allow-Origin': CORS_ORIGIN,
-    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type'
-  };
-}
-
-function doOptions() {
-  return ContentService.createTextOutput('')
-    .setMimeType(ContentService.MimeType.TEXT)
-    .setHeaders(_corsHeaders());
-}
-
-function doPost(e) {
-  if (!e || !e.postData || !e.postData.contents) return _json({ ok:false, error:'no body' }, 400);
-  const secret = (e.parameter && e.parameter.secret) || '';
-  if (secret !== SHARED_SECRET) return _json({ ok:false, error:'unauthorized' }, 401);
-
-  let data;
-  try { data = JSON.parse(e.postData.contents); } catch { return _json({ ok:false, error:'invalid json' }, 400); }
-  const { name='Anon', date, title, category='', points=0, timestamp=Date.now() } = data;
-
-  const sh = _sheet();
-  sh.appendRow([new Date(timestamp), name, date, title, category, Number(points)]);
-  return _json({ ok:true });
-}
-
-function doGet(e) {
-  const params = e && e.parameter ? e.parameter : {};
-  const action = params.action || 'leaderboard';
-  const days = Math.max(1, Math.min(365, Number(params.days || 7)));
-
-  if (action === 'leaderboard') {
-    const sh = _sheet();
-    const rows = sh.getDataRange().getValues(); // includes header
-    const header = rows.shift();
-    const idx = { timestamp:0, name:1, date:2, title:3, category:4, points:5 };
-
-    const cutoff = new Date();
-    cutoff.setDate(cutoff.getDate() - days);
-    const cutoffISO = cutoff.toISOString().slice(0,10);
-
-    const totals = {};
-    rows.forEach(r => {
-      const date = typeof r[idx.date] === 'string' ? r[idx.date] : Utilities.formatDate(new Date(r[idx.timestamp]), Session.getScriptTimeZone(), 'yyyy-MM-dd');
-      if (date >= cutoffISO) {
-        const name = r[idx.name] || 'Anon';
-        const pts = Number(r[idx.points] || 0);
-        totals[name] = (totals[name] || 0) + pts;
-      }
-    });
-
-    const out = Object.keys(totals)
-      .map(n => ({ name:n, points: totals[n] }))
-      .sort((a,b)=>b.points-a.points);
-
-    return _json({ ok:true, range: days, leaderboard: out });
-  }
-
-  return _json({ ok:false, error:'unknown action' }, 400);
-}
-
-function _json(obj, code=200) {
-  const output = ContentService.createTextOutput(JSON.stringify(obj))
-    .setMimeType(ContentService.MimeType.JSON);
-  const headers = _corsHeaders();
-  const resp = output.setHeaders(headers);
-  // Apps Script can't set status code directly per se, but this is fine for most uses.
-  return resp;
-}
 
 /* -------------------- MAIN APP -------------------- */
 export default function App() {
@@ -503,39 +427,50 @@ export default function App() {
   const [person, setPerson] = useState(profiles[0] || "");
   const [state, setState] = useState(() => loadPersonState(person));
 
-  // Load/save current person's state
+  // Theme class on <html>
   useEffect(() => {
-    const theme = state.settings.theme;
-    document.documentElement.classList.toggle('dark', theme === 'dark');
+    document.documentElement.classList.toggle('dark', state.settings.theme === 'dark');
   }, [state.settings.theme]);
 
+  // Switch person
   useEffect(() => {
     if (!person) return;
     setState(loadPersonState(person));
   }, [person]);
 
+  // Persist current person's state
   useEffect(() => {
     if (!person) return;
     savePersonState(person, state);
   }, [person, state]);
 
-  // Derived vals
+  // Derived
   const { settings, quests, history, xp, level, streak, lastGoalDate } = state;
   const dateToday = todayISO();
   const historyToday = useMemo(() => history.filter(h => h.date === dateToday), [history, dateToday]);
   const nextXP = useMemo(() => xpForLevel(level), [level]);
 
-  // Core actions
-  const completeQuest = (q) => {
+  // Complete quest (local + cloud)
+  const completeQuest = async (q) => {
     if (!person) {
       alert("Select or add a person first.");
       return;
     }
-    const entry = { id: uid(), date: dateToday, questId: q.id, title: q.title, points: q.points, emoji: q.emoji, timestamp: Date.now() };
+
+    const entry = {
+      id: uid(),
+      date: dateToday,
+      questId: q.id,
+      title: q.title,
+      category: q.category, // keep for CSV / filters
+      points: q.points,
+      emoji: q.emoji,
+      timestamp: Date.now()
+    };
     const newHistory = [...history, entry];
     const newXP = xp + q.points;
 
-    // Level up
+    // Level-up math
     let newLevel = level;
     let remainder = newXP;
     let needed = xpForLevel(newLevel);
@@ -545,18 +480,38 @@ export default function App() {
       needed = xpForLevel(newLevel);
     }
 
-    // Streak
-    const totalToday = newHistory.filter(h => h.date === dateToday).reduce((s, h) => s + h.points, 0);
-    let newStreak = streak, newLastGoalDate = lastGoalDate;
+    // Streak logic
+    const totalToday = newHistory
+      .filter(h => h.date === dateToday)
+      .reduce((s, h) => s + h.points, 0);
+
+    let newStreak = streak;
+    let newLastGoalDate = lastGoalDate;
     if (totalToday >= settings.dailyGoal && lastGoalDate !== dateToday) {
-      const y = new Date(dateToday); y.setDate(y.getDate() - 1);
-      const yISO = y.toISOString().slice(0,10);
+      const y = new Date(dateToday);
+      y.setDate(y.getDate() - 1);
+      const yISO = y.toISOString().slice(0, 10);
       newStreak = (lastGoalDate === yISO) ? streak + 1 : 1;
       newLastGoalDate = dateToday;
     }
 
+    // Save locally
     const next = { ...state, history: newHistory, xp: newXP, level: newLevel, streak: newStreak, lastGoalDate: newLastGoalDate, name: person };
     setState(next);
+
+    // Save to Google Sheet (central)
+    try {
+      await saveActivityToSheet({
+        name: person,
+        date: dateToday,
+        title: q.title,
+        category: q.category || "General",
+        points: q.points,
+        timestamp: Date.now()
+      });
+    } catch (err) {
+      console.warn("Could not save to Google Sheet:", err);
+    }
   };
 
   const addQuest = (q) => setState(s => ({ ...s, quests: [q, ...s.quests] }));
@@ -691,4 +646,3 @@ export default function App() {
     </div>
   );
 }
-
