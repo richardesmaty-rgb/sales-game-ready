@@ -1,44 +1,30 @@
-// ==============================
-// TAP-HR Productivity Game Cloud Helpers
-// ==============================
+// src/cloud.js
+const ENDPOINT = "https://script.google.com/macros/s/AKfycbyiuh4wLlxOT8g_El6wUtdd5JFwH-qGbq5bWS_fUf20jNK69Brm-b4lUhF4CR_hhm-UYQ/exec";
 
-// 🔹 Replace this with YOUR Google Apps Script Web App URL (must end with /exec)
-const ENDPOINT = "https://script.google.com/macros/s/AKfycbwAfwb505oVKSKjBX847z4r5FtfD1QXJa410OQmHkdzJ9rp-FUb4mzXaIAxLMugW4aJGQ/exec";
-
-// 🔹 Must match SHARED_SECRET in your Apps Script code
-const SECRET = "CHANGE_ME_very_secret";
-
-/**
- * Save a completed activity into Google Sheets.
- * Called automatically when a quest is completed.
- */
+// Save a single activity row
 export async function saveActivityToSheet({ name, date, title, category, points, timestamp }) {
   try {
-    const res = await fetch(`${ENDPOINT}?secret=${encodeURIComponent(SECRET)}`, {
+    const res = await fetch(ENDPOINT, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name, date, title, category, points, timestamp })
+      body: JSON.stringify({ name, date, title, category, points, timestamp }),
     });
-
-    if (!res.ok) {
-      console.warn("Google Sheets save failed:", res.statusText);
-    }
-  } catch (err) {
-    console.error("❌ Save to Google Sheet failed:", err);
+    const json = await res.json();
+    if (!json.ok) console.warn("Sheet save failed:", json);
+    return json;
+  } catch (e) {
+    console.error("Save to Google Sheet failed:", e);
   }
 }
 
-/**
- * Fetch leaderboard (optional — if you want live scores from the sheet).
- * @param {number} days - number of days back to include (e.g. 7, 30).
- */
+// Fetch leaderboard from the Sheet
 export async function fetchLeaderboardFromSheet(days = 7) {
   try {
     const res = await fetch(`${ENDPOINT}?action=leaderboard&days=${days}`);
     const json = await res.json();
     return json.ok ? json.leaderboard : [];
-  } catch (err) {
-    console.error("❌ Fetch leaderboard failed:", err);
+  } catch (e) {
+    console.error("Fetch leaderboard failed:", e);
     return [];
   }
 }
