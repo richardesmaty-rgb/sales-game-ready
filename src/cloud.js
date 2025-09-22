@@ -1,44 +1,80 @@
-// src/cloud.js
-// Small helper used by the React app to talk to your Apps Script backend.
+// Code.gs - Google Apps Script with CORS headers and secret validation
 
-export const ENDPOINT = "https://script.google.com/macros/s/AKfycbwGLevarq_HPKgAcMSC-H3SuLTISAVvL6CLTAPp-73ottc0qW_r1hj2tcCm1chu5Dy_XQ/exec";
-// ^^^ Your new Apps Script URL
-
-export const SHARED_SECRET = "my_super_secret_sales_game_2024!";
-// ^^^ MUST match SHARED_SECRET in Code.gs
-
-/** Save a single activity to the Google Sheet (fire-and-forget). */
-export async function saveActivityToSheet({ name, date, title, category, points, timestamp }) {
-  try {
-    await fetch(`${ENDPOINT}?secret=${encodeURIComponent(SHARED_SECRET)}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        name,
-        date,
-        title,
-        category: category || "",
-        points: Number(points || 0),
-        timestamp: timestamp || Date.now()
-      })
-    });
-  } catch (err) {
-    // Non-blocking: we still keep everything locally.
-    console.warn("saveActivityToSheet failed:", err);
-  }
+// Add CORS headers function
+function setCorsHeaders() {
+  return {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type'
+  };
 }
 
-/** Get leaderboard (last N days). Returns [] on failure. */
-export async function fetchLeaderboardFromSheet(days = 7) {
-  try {
-    const res = await fetch(`${ENDPOINT}?action=leaderboard&days=${encodeURIComponent(days)}`, {
-      method: "GET",
-      headers: { "Content-Type": "application/json" }
-    });
-    const json = await res.json();
-    return json && json.ok && Array.isArray(json.leaderboard) ? json.leaderboard : [];
-  } catch (err) {
-    console.warn("fetchLeaderboardFromSheet failed:", err);
-    return [];
+function doPost(e) {
+  const SHARED_SECRET = "my_super_secret_sales_game_2024!";
+  
+  // Handle OPTIONS preflight request
+  if (e.parameter && e.parameter.options) {
+    return ContentService.createTextOutput()
+      .setHeaders(setCorsHeaders())
+      .setStatusCode(200);
   }
+  
+  // Check if the secret matches
+  if (e.parameter.secret !== SHARED_SECRET) {
+    return ContentService.createTextOutput(JSON.stringify({
+      ok: false,
+      error: "Invalid secret"
+    }))
+    .setHeaders(setCorsHeaders())
+    .setMimeType(ContentService.MimeType.JSON);
+  }
+  
+  // Your existing doPost code here - process the data and save to sheet
+  // ... your existing data processing logic ...
+  
+  // Example response (modify based on your existing code)
+  var response = {
+    ok: true,
+    message: "Data saved successfully"
+  };
+  
+  return ContentService.createTextOutput(JSON.stringify(response))
+    .setHeaders(setCorsHeaders())
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
+function doGet(e) {
+  const SHARED_SECRET = "my_super_secret_sales_game_2024!";
+  
+  // Handle OPTIONS preflight request
+  if (e.parameter && e.parameter.options) {
+    return ContentService.createTextOutput()
+      .setHeaders(setCorsHeaders())
+      .setStatusCode(200);
+  }
+  
+  // Check if the secret matches
+  if (e.parameter.secret !== SHARED_SECRET) {
+    return ContentService.createTextOutput(JSON.stringify({
+      ok: false,
+      error: "Invalid secret"
+    }))
+    .setHeaders(setCorsHeaders())
+    .setMimeType(ContentService.MimeType.JSON);
+  }
+  
+  // Your existing doGet code here - handle leaderboard requests
+  // ... your existing leaderboard logic ...
+  
+  // Example response (modify based on your existing code)
+  var response = {
+    ok: true,
+    leaderboard: [
+      // your leaderboard data here
+    ]
+  };
+  
+  return ContentService.createTextOutput(JSON.stringify(response))
+    .setHeaders(setCorsHeaders())
+    .setMimeType(ContentService.MimeType.JSON);
 }
