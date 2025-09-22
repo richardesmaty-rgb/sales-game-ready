@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { saveActivityToSheet } from "./cloud";
+import { saveActivityToSheet, fetchLeaderboardFromSheet } from "./cloud";
 
 /**
  * Sales & Marketing Productivity Game — Multi-user + Local Leaderboard
@@ -10,6 +11,8 @@ import { saveActivityToSheet } from "./cloud";
  * - Export/Import PER PERSON (JSON)
  * - Tailwind UI
  */
+
+
 
 /* -------------------- Utilities -------------------- */
 const todayISO = () => new Date().toISOString().slice(0, 10);
