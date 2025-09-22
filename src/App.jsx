@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import { saveActivityToSheet } from "./cloud";
 import { saveActivityToSheet, fetchLeaderboardFromSheet } from "./cloud";
 
+
 /**
  * Sales & Marketing Productivity Game — Multi-user + Local Leaderboard
  * - Multiple users (profiles stored locally)
