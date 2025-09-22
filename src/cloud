@@ -1,0 +1,19 @@
+// Google Apps Script Web App URL (ends with /exec)
+const ENDPOINT = "https://script.google.com/macros/s/AKfycbwAfwb505oVKSKjBX847z4r5FtfD1QXJa410OQmHkdzJ9rp-FUb4mzXaIAxLMugW4aJGQ/exec";
+// Must match SHARED_SECRET in your Apps Script
+const SECRET   = "CHANGE_ME_very_secret";
+
+export async function saveActivityToSheet({ name, date, title, category, points, timestamp }) {
+  try {
+    await fetch(`${ENDPOINT}?secret=${encodeURIComponent(SECRET)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, date, title, category, points, timestamp })
+    });
+  } catch (e) {
+    console.warn("Save to Google Sheet failed:", e);
+  }
+}
+
+// (Optional) If later you want cloud leaderboard, we’ll add:
+// export async function fetchLeaderboardFromSheet(days = 7) { ... }
