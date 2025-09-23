@@ -1,25 +1,23 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { saveActivityToSheet } from "./cloud";
 // import { saveActivityToSheet, fetchLeaderboardFromSheet } from "./cloud";
 
-
 /**
  * Sales & Marketing Productivity Game — Multi-user + Local Leaderboard
- * - Multiple users (profiles stored locally)
- * - Per-person progress, streaks, levels, history, settings
- * - Local leaderboard (last 7 / 30 days) across all profiles
- * - Quests (predefined + custom), daily goal, XP/levels, badges, timer
- * - Export/Import PER PERSON (JSON)
- * - Tailwind UI
+ * Updates in this version:
+ * - System theme (light/dark/system), tracks OS changes
+ * - Undo last action (button + Ctrl/Cmd+Z)
+ * - "Export All CSV" (across all profiles)
+ * - Focus Timer awards: Work +25, Short +5, Long +15
+ * - Notification on timer expiry (Notification API with beep fallback)
  */
-
-
 
 /* -------------------- Utilities -------------------- */
 const todayISO = () => new Date().toISOString().slice(0, 10);
 const clamp = (n, min, max) => Math.max(min, Math.min(max, n));
 const uid = () => Math.random().toString(36).slice(2, 9);
 const xpForLevel = (level) => 100 + (level - 1) * 75;
+function safeJSONParse(str, fallback) { try { return JSON.parse(str); } catch { return fallback; } }
 
 /* -------------------- Defaults -------------------- */
 const defaultQuests = [
@@ -38,10 +36,14 @@ const defaultSettings = {
   pomodoroMinutes: 25,
   shortBreakMinutes: 5,
   longBreakMinutes: 15,
-  theme: "light",
+  theme: "system", // light | dark | system
 };
 
+const STORAGE_VERSION = 2;
+
+/* -------------------- Fresh person state -------------------- */
 const makeFreshState = (name = "") => ({
+  __version: STORAGE_VERSION,
   name,
   settings: { ...defaultSettings },
   quests: defaultQuests,
@@ -55,15 +57,10 @@ const makeFreshState = (name = "") => ({
 /* -------------------- Local Storage (multi-user) -------------------- */
 const STORAGE_PREFIX = "sm-productivity-game:v2:";
 const PROFILES_KEY = STORAGE_PREFIX + "profiles"; // string[]
-const SHARED_SECRET = 'YOUR_SUPER_SECRET';
 
 function loadProfiles() {
-  try {
-    const arr = JSON.parse(localStorage.getItem(PROFILES_KEY)) || [];
-    return Array.isArray(arr) ? arr : [];
-  } catch {
-    return [];
-  }
+  const arr = safeJSONParse(localStorage.getItem(PROFILES_KEY), []);
+  return Array.isArray(arr) ? arr : [];
 }
 function saveProfiles(arr) {
   localStorage.setItem(PROFILES_KEY, JSON.stringify(arr));
@@ -71,30 +68,42 @@ function saveProfiles(arr) {
 function personKey(person) {
   return STORAGE_PREFIX + "person:" + person;
 }
+function migrateState(parsed, person) {
+  const base = makeFreshState(person);
+  const settings = { ...defaultSettings, ...(parsed.settings || {}) };
+  const quests = (parsed.quests?.length ? parsed.quests : defaultQuests).map(q => ({ emoji: "🎯", ...q }));
+  return {
+    ...base,
+    ...parsed,
+    __version: STORAGE_VERSION,
+    name: person,
+    settings,
+    quests,
+  };
+}
 function loadPersonState(person) {
   if (!person) return makeFreshState("");
-  try {
-    const raw = localStorage.getItem(personKey(person));
-    if (!raw) return makeFreshState(person);
-    const parsed = JSON.parse(raw);
-    return {
-      ...makeFreshState(person),
-      ...parsed,
-      name: person,
-      settings: { ...defaultSettings, ...(parsed.settings || {}) },
-      quests: (parsed.quests?.length ? parsed.quests : defaultQuests).map((q) => ({ emoji: "🎯", ...q })),
-    };
-  } catch {
-    return makeFreshState(person);
-  }
+  const raw = localStorage.getItem(personKey(person));
+  if (!raw) return makeFreshState(person);
+  const parsed = safeJSONParse(raw, null);
+  if (!parsed) return makeFreshState(person);
+  return migrateState(parsed, person);
 }
 function savePersonState(person, state) {
   if (!person) return;
-  localStorage.setItem(personKey(person), JSON.stringify(state));
+  localStorage.setItem(personKey(person), JSON.stringify({ ...state, __version: STORAGE_VERSION }));
+}
+
+/* -------------------- Theme helpers -------------------- */
+function effectiveTheme(themeSetting) {
+  if (themeSetting === "light") return "light";
+  if (themeSetting === "dark") return "dark";
+  const prefersDark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+  return prefersDark ? "dark" : "light";
 }
 
 /* -------------------- Header -------------------- */
-function Header({ level, xp, nextXP, onExport, onImport, onReset, theme, setTheme }) {
+function Header({ level, xp, nextXP, onReset, theme, setTheme, onExportAllCSV }) {
   const pct = clamp(Math.round((xp / nextXP) * 100), 0, 100);
   return (
     <header className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
@@ -119,15 +128,25 @@ function Header({ level, xp, nextXP, onExport, onImport, onReset, theme, setThem
             <div className="h-full bg-black" style={{ width: `${pct}%` }} />
           </div>
         </div>
-        <button onClick={onExport} className="px-3 py-2 rounded-xl border shadow-sm hover:shadow">Export</button>
-        <label className="px-3 py-2 rounded-xl border shadow-sm hover:shadow cursor-pointer">
-          Import
-          <input type="file" accept="application/json" className="hidden" onChange={onImport} />
-        </label>
-        <button onClick={onReset} className="px-3 py-2 rounded-xl border shadow-sm hover:shadow">Reset</button>
-        <button onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')} className="px-3 py-2 rounded-xl border shadow-sm hover:shadow">
-          {theme === 'light' ? '🌙 Dark' : '☀️ Light'}
+
+        {/* #5 Export all profiles CSV */}
+        <button onClick={onExportAllCSV} className="px-3 py-2 rounded-xl border shadow-sm hover:shadow">
+          Export All CSV
         </button>
+
+        <button onClick={onReset} className="px-3 py-2 rounded-xl border shadow-sm hover:shadow">Reset</button>
+
+        {/* #1 Theme select (system aware) */}
+        <select
+          value={theme}
+          onChange={(e)=>setTheme(e.target.value)}
+          className="px-3 py-2 rounded-xl border shadow-sm hover:shadow"
+          title="Theme"
+        >
+          <option value="system">🖥️ System</option>
+          <option value="light">☀️ Light</option>
+          <option value="dark">🌙 Dark</option>
+        </select>
       </div>
     </header>
   );
@@ -145,7 +164,6 @@ function PeopleBar({ person, setPerson, profiles, setProfiles, onExportCSV }) {
       setProfiles(next);
       saveProfiles(next);
     }
-    // ensure a state blob exists
     const existing = localStorage.getItem(personKey(name));
     if (!existing) savePersonState(name, makeFreshState(name));
     setPerson(name);
@@ -179,6 +197,7 @@ function PeopleBar({ person, setPerson, profiles, setProfiles, onExportCSV }) {
       {!!person && (
         <button onClick={removePerson} className="px-3 py-2 rounded-xl border shadow-sm">Remove</button>
       )}
+      {/* Per-person CSV (kept) */}
       <button onClick={onExportCSV} className="px-3 py-2 rounded-xl border shadow-sm">Export CSV</button>
     </div>
   );
@@ -197,7 +216,7 @@ function DailyProgress({ historyToday, dailyGoal, onSetGoal }) {
           <input
             type="number"
             value={dailyGoal}
-            onChange={(e) => onSetGoal(clamp(parseInt(e.target.value || 0), 10, 10000))}
+            onChange={(e) => onSetGoal(clamp(parseInt(e.target.value || 0, 10), 10, 10000))}
             className="w-24 px-2 py-1 border rounded-lg"
           />
           <span>pts</span>
@@ -245,7 +264,7 @@ function QuestEditor({ initial, onSave, onCancel }) {
     <div className="p-4 rounded-2xl border shadow-sm bg-white/70 flex flex-col gap-3">
       <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
         <input className="px-3 py-2 border rounded-xl" placeholder="Title" value={title} onChange={e=>setTitle(e.target.value)} />
-        <input type="number" className="px-3 py-2 border rounded-xl" placeholder="Points" value={points} onChange={e=>setPoints(parseInt(e.target.value||0))} />
+        <input type="number" className="px-3 py-2 border rounded-xl" placeholder="Points" value={points} onChange={e=>setPoints(parseInt(e.target.value||0,10))} />
         <select className="px-3 py-2 border rounded-xl" value={category} onChange={e=>setCategory(e.target.value)}>
           <option>Sales</option><option>Marketing</option><option>Ops</option><option>Learning</option>
         </select>
@@ -331,23 +350,48 @@ function Badges({ allHistory, level, dailyGoal }) {
 }
 
 /* -------------------- Timer -------------------- */
-function Timer({ settings }) {
+function Timer({ settings, onTimerComplete }) {
   const [mode, setMode] = useState('work'); // work | short | long
   const [seconds, setSeconds] = useState(settings.pomodoroMinutes * 60);
   const [running, setRunning] = useState(false);
+  const notifRef = useRef(null);
 
+  // tick
   useEffect(() => {
     let t;
     if (running) t = setInterval(() => setSeconds(s => Math.max(0, s-1)), 1000);
     return () => clearInterval(t);
   }, [running]);
 
+  // expiry
   useEffect(() => {
-    if (seconds === 0) {
-      setRunning(false);
-      try { new Audio("data:audio/wav;base64,UklGRkQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABYAAAACAAACAAA=").play(); } catch {}
+    if (seconds !== 0) return;
+    if (running) setRunning(false);
+
+    // play tiny beep
+    try { new Audio("data:audio/wav;base64,UklGRkQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABYAAAACAAACAAA=").play(); } catch {}
+
+    // desktop notification if allowed
+    const title = mode === 'work' ? "Work block done" : mode === 'short' ? "Short break over" : "Long break over";
+    const body = "Nice! Logging points now.";
+    if ("Notification" in window) {
+      if (Notification.permission === "granted") {
+        notifRef.current = new Notification(title, { body });
+      } else if (Notification.permission === "default") {
+        Notification.requestPermission().then(p => { if (p === "granted") notifRef.current = new Notification(title, { body }); });
+      }
+    } else {
+      alert(`${title} — Logging points.`);
     }
+
+    // award points
+    onTimerComplete(mode);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [seconds]);
+
+  useEffect(() => {
+    // Track OS theme changes for "system" theme at app level (handled there)
+  }, []);
 
   const resetTo = (m) => {
     setMode(m);
@@ -431,49 +475,66 @@ export default function App() {
   const [profiles, setProfiles] = useState(loadProfiles());
   const [person, setPerson] = useState(profiles[0] || "");
   const [state, setState] = useState(() => loadPersonState(person));
+  const [undoStack, setUndoStack] = useState([]); // #2 undo
 
-  // Theme class on <html>
+  // Apply effective theme + watch OS changes when using "system"
   useEffect(() => {
-    document.documentElement.classList.toggle('dark', state.settings.theme === 'dark');
+    const apply = () => {
+      const eff = effectiveTheme(state.settings.theme);
+      document.documentElement.classList.toggle('dark', eff === 'dark');
+    };
+    apply();
+    let mql;
+    if (state.settings.theme === 'system' && window.matchMedia) {
+      mql = window.matchMedia('(prefers-color-scheme: dark)');
+      const handler = () => apply();
+      mql.addEventListener ? mql.addEventListener('change', handler) : mql.addListener(handler);
+      return () => {
+        mql.removeEventListener ? mql.removeEventListener('change', handler) : mql.removeListener(handler);
+      };
+    }
   }, [state.settings.theme]);
 
   // Switch person
-  useEffect(() => {
-    if (!person) return;
-    setState(loadPersonState(person));
-  }, [person]);
+  useEffect(() => { if (person) setState(loadPersonState(person)); }, [person]);
 
   // Persist current person's state
+  useEffect(() => { if (person) savePersonState(person, state); }, [person, state]);
+
+  // Undo shortcut
   useEffect(() => {
-    if (!person) return;
-    savePersonState(person, state);
-  }, [person, state]);
+    function onKey(e) {
+      const z = e.key && e.key.toLowerCase() === 'z';
+      if ((e.ctrlKey || e.metaKey) && z) { e.preventDefault(); undoLast(); }
+    }
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [undoStack, state, person]);
 
   // Derived
   const { settings, quests, history, xp, level, streak, lastGoalDate } = state;
   const dateToday = todayISO();
-  const historyToday = useMemo(() => history.filter(h => h.date === dateToday), [history, dateToday]);
+  const historyToday = useMemo(() => history.filter(h => h.date === dateToday).sort((a,b)=>b.timestamp-a.timestamp), [history, dateToday]);
   const nextXP = useMemo(() => xpForLevel(level), [level]);
 
-  // Complete quest (local + cloud)
-  const completeQuest = async (q) => {
-    if (!person) {
-      alert("Select or add a person first.");
-      return;
-    }
+  // Central entry add (used by quests + timer)
+  const addEntry = async ({ title, category, points, emoji, questId=null }) => {
+    if (!person) { alert("Select or add a person first."); return; }
 
     const entry = {
       id: uid(),
       date: dateToday,
-      questId: q.id,
-      title: q.title,
-      category: q.category, // keep for CSV / filters
-      points: q.points,
-      emoji: q.emoji,
+      questId,
+      title,
+      category: category || "General",
+      points,
+      emoji,
       timestamp: Date.now()
     };
+
     const newHistory = [...history, entry];
-    const newXP = xp + q.points;
+    const newXP = xp + points;
 
     // Level-up math
     let newLevel = level;
@@ -486,70 +547,62 @@ export default function App() {
     }
 
     // Streak logic
-    const totalToday = newHistory
-      .filter(h => h.date === dateToday)
-      .reduce((s, h) => s + h.points, 0);
-
+    const totalToday = newHistory.filter(h => h.date === dateToday).reduce((s, h) => s + h.points, 0);
     let newStreak = streak;
     let newLastGoalDate = lastGoalDate;
     if (totalToday >= settings.dailyGoal && lastGoalDate !== dateToday) {
-      const y = new Date(dateToday);
-      y.setDate(y.getDate() - 1);
+      const y = new Date(dateToday); y.setDate(y.getDate() - 1);
       const yISO = y.toISOString().slice(0, 10);
       newStreak = (lastGoalDate === yISO) ? streak + 1 : 1;
       newLastGoalDate = dateToday;
     }
 
     // Save locally
+    const prev = state;
     const next = { ...state, history: newHistory, xp: newXP, level: newLevel, streak: newStreak, lastGoalDate: newLastGoalDate, name: person };
     setState(next);
+
+    // push to undo stack
+    setUndoStack((st)=>[{ entry, prev }, ...st].slice(0, 25));
 
     // Save to Google Sheet (central)
     try {
       await saveActivityToSheet({
         name: person,
         date: dateToday,
-        title: q.title,
-        category: q.category || "General",
-        points: q.points,
-        timestamp: Date.now()
+        title,
+        category: category || "General",
+        points,
+        timestamp: entry.timestamp
       });
     } catch (err) {
       console.warn("Could not save to Google Sheet:", err);
     }
   };
 
+  // #2 Undo impl
+  function undoLast() {
+    if (!undoStack.length) return;
+    const { prev } = undoStack[0];
+    setState(prev);
+    setUndoStack((st)=>st.slice(1));
+  }
+
+  // Complete quest (delegates to addEntry)
+  const completeQuest = (q) => addEntry({ title: q.title, category: q.category, points: q.points, emoji: q.emoji, questId: q.id });
+
   const addQuest = (q) => setState(s => ({ ...s, quests: [q, ...s.quests] }));
   const updateQuest = (q) => setState(s => ({ ...s, quests: s.quests.map(x => x.id===q.id? q : x) }));
   const deleteQuest = (id) => setState(s => ({ ...s, quests: s.quests.filter(q => q.id!==id) }));
   const setDailyGoal = (val) => setState(s => ({ ...s, settings: { ...s.settings, dailyGoal: val }}));
 
-  // Export / Import (per-person)
-  const doExport = () => {
-    if (!person) return alert("Select a person first.");
-    const blob = new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = `sm-game-${person}-${todayISO()}.json`; a.click();
-    URL.revokeObjectURL(url);
-  };
-  const doImport = (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      try {
-        const data = JSON.parse(reader.result);
-        const merged = { ...makeFreshState(person), ...data, name: person, settings: { ...defaultSettings, ...(data.settings||{}) } };
-        setState(merged);
-      } catch { alert('Invalid JSON'); }
-    };
-    reader.readAsText(file);
-  };
+  // Removed JSON Export/Import handlers (per request)
+
   const doReset = () => {
     if (!person) return alert("Select a person first.");
     if (confirm(`Reset all data for ${person}?`)) setState(makeFreshState(person));
   };
+
   const exportCSV = () => {
     if (!person) return alert("Select a person first.");
     const rows = [
@@ -564,11 +617,45 @@ export default function App() {
     URL.revokeObjectURL(a.href);
   };
 
+  // #5 Export all profiles to single CSV
+  function exportAllProfilesCSV() {
+    const profs = loadProfiles();
+    const rows = [["person","date","time","title","category","points","level","streak"]];
+    for (const p of profs) {
+      const s = loadPersonState(p);
+      for (const h of s.history || []) {
+        rows.push([
+          p,
+          h.date,
+          new Date(h.timestamp).toLocaleTimeString(),
+          h.title,
+          h.category||"",
+          h.points,
+          s.level,
+          s.streak
+        ]);
+      }
+    }
+    const csv = rows.map(r=>r.map(x=>`"${String(x).replace(/"/g,'""')}"`).join(",")).join("\n");
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([csv], {type:"text/csv"}));
+    a.download = `sm-game-all-${todayISO()}.csv`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
+
   // UI filters
   const [editing, setEditing] = useState(null);
   const [tab, setTab] = useState('All');
   const categories = ['All', ...Array.from(new Set(quests.map(q=>q.category)))];
   const filteredQuests = quests.filter(q => tab==='All' || q.category===tab);
+
+  // Focus timer completion → award points
+  const handleTimerComplete = (mode) => {
+    const points = mode === 'work' ? 25 : mode === 'short' ? 5 : 15; // as requested
+    const title = mode === 'work' ? "Focus block (Work)" : mode === 'short' ? "Focus block (Short break)" : "Focus block (Long break)";
+    addEntry({ title, category: "Ops", points, emoji: "⏱️" });
+  };
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-gray-50 to-gray-100 dark:from-gray-900 dark:to-black text-gray-900 dark:text-gray-100">
@@ -579,12 +666,17 @@ export default function App() {
             level={level}
             xp={xp % nextXP}
             nextXP={nextXP}
-            onExport={doExport}
-            onImport={doImport}
             onReset={doReset}
             theme={state.settings.theme}
             setTheme={(t)=>setState(s=>({...s, settings:{...s.settings, theme:t}}))}
+            onExportAllCSV={exportAllProfilesCSV}
           />
+          <div className="flex items-center gap-2">
+            {/* #2 Undo button */}
+            <button onClick={undoLast} className="px-3 py-2 rounded-xl border shadow-sm" disabled={!undoStack.length}>
+              Undo (Ctrl/Cmd+Z)
+            </button>
+          </div>
           <PeopleBar
             person={person}
             setPerson={setPerson}
@@ -622,7 +714,7 @@ export default function App() {
               ))}
             </div>
 
-            <History history={historyToday.sort((a,b)=>b.timestamp-a.timestamp)} />
+            <History history={historyToday} />
 
             {/* Local leaderboard across profiles */}
             <Leaderboard profiles={profiles} />
@@ -632,7 +724,7 @@ export default function App() {
           <div className="space-y-6">
             <Stats allHistory={history} streak={streak} level={level} />
             <Badges allHistory={history} level={level} dailyGoal={settings.dailyGoal} />
-            <Timer settings={settings} />
+            <Timer settings={settings} onTimerComplete={handleTimerComplete} />
 
             <div className="p-4 rounded-2xl border shadow-sm bg-white/60">
               <h3 className="font-semibold mb-2">Tips</h3>
@@ -646,7 +738,7 @@ export default function App() {
           </div>
         </div>
 
-        <footer className="text-xs opacity-60 mt-10">Multi-user • Local leaderboard • Per-person Export/Import</footer>
+        <footer className="text-xs opacity-60 mt-10">Multi-user • Local leaderboard • Per-person Export CSV • Export All Profiles</footer>
       </div>
     </div>
   );
