@@ -1,17 +1,41 @@
-import React, { useEffect, useMemo, useState } from "react";
-import { saveActivityToSheet } from "./cloud"; // optional; safe if implemented
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { saveActivityToSheet } from "./cloud";
 
 /**
- * Sales & Marketing Productivity Game — Multi-user + Local Leaderboard
- * + Mobile-safe Focus timer reward
- * + Midnight rollover for "Today's Progress"
+ * Sales & Marketing Productivity Game (mobile polished)
+ * - High-contrast controls / dark-mode
+ * - Theme: light | dark | system
+ * - Export CSV (person + all)
+ * - Focus Timer awards: Work +25, Short +5, Long +15
+ * - FIX: reliable mobile timer awards + no white-screen alerts
+ * - FIX: today's progress rolls over after midnight
  */
+
+/* -------------------- UI class helpers -------------------- */
+const CONTROL =
+  "px-3 py-2 rounded-xl border shadow-sm " +
+  "bg-white text-gray-900 placeholder-gray-400 " +
+  "dark:bg-gray-800 dark:text-gray-100 dark:placeholder-gray-400 " +
+  "border-gray-300 dark:border-gray-600 " +
+  "focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500";
+
+const BTN =
+  "px-3 py-2 rounded-xl border shadow-sm hover:shadow " +
+  "bg-white text-gray-900 border-gray-300 " +
+  "dark:bg-gray-800 dark:text-gray-100 dark:border-gray-600 " +
+  "focus:outline-none focus:ring-2 focus:ring-blue-500";
+
+const TAB_BTN =
+  "px-3 py-2 rounded-xl border shadow-sm text-sm " +
+  "bg-white text-gray-900 border-gray-300 " +
+  "dark:bg-gray-800 dark:text-gray-100 dark:border-gray-600";
 
 /* -------------------- Utilities -------------------- */
 const todayISO = () => new Date().toISOString().slice(0, 10);
 const clamp = (n, min, max) => Math.max(min, Math.min(max, n));
 const uid = () => Math.random().toString(36).slice(2, 9);
 const xpForLevel = (level) => 100 + (level - 1) * 75;
+function safeJSONParse(str, fallback) { try { return JSON.parse(str); } catch { return fallback; } }
 
 /* -------------------- Defaults -------------------- */
 const defaultQuests = [
@@ -30,11 +54,14 @@ const defaultSettings = {
   pomodoroMinutes: 25,
   shortBreakMinutes: 5,
   longBreakMinutes: 15,
-  theme: "light",
-  timerRewardPoints: 5,   // ✅ points awarded when a Work timer completes
+  theme: "system", // light | dark | system
 };
 
+const STORAGE_VERSION = 2;
+
+/* -------------------- Fresh person state -------------------- */
 const makeFreshState = (name = "") => ({
+  __version: STORAGE_VERSION,
   name,
   settings: { ...defaultSettings },
   quests: defaultQuests,
@@ -47,15 +74,11 @@ const makeFreshState = (name = "") => ({
 
 /* -------------------- Local Storage (multi-user) -------------------- */
 const STORAGE_PREFIX = "sm-productivity-game:v2:";
-const PROFILES_KEY = STORAGE_PREFIX + "profiles";
+const PROFILES_KEY = STORAGE_PREFIX + "profiles"; // string[]
 
 function loadProfiles() {
-  try {
-    const arr = JSON.parse(localStorage.getItem(PROFILES_KEY)) || [];
-    return Array.isArray(arr) ? arr : [];
-  } catch {
-    return [];
-  }
+  const arr = safeJSONParse(localStorage.getItem(PROFILES_KEY), []);
+  return Array.isArray(arr) ? arr : [];
 }
 function saveProfiles(arr) {
   localStorage.setItem(PROFILES_KEY, JSON.stringify(arr));
@@ -63,30 +86,42 @@ function saveProfiles(arr) {
 function personKey(person) {
   return STORAGE_PREFIX + "person:" + person;
 }
+function migrateState(parsed, person) {
+  const base = makeFreshState(person);
+  const settings = { ...defaultSettings, ...(parsed.settings || {}) };
+  const quests = (parsed.quests?.length ? parsed.quests : defaultQuests).map(q => ({ emoji: "🎯", ...q }));
+  return {
+    ...base,
+    ...parsed,
+    __version: STORAGE_VERSION,
+    name: person,
+    settings,
+    quests,
+  };
+}
 function loadPersonState(person) {
   if (!person) return makeFreshState("");
-  try {
-    const raw = localStorage.getItem(personKey(person));
-    if (!raw) return makeFreshState(person);
-    const parsed = JSON.parse(raw);
-    return {
-      ...makeFreshState(person),
-      ...parsed,
-      name: person,
-      settings: { ...defaultSettings, ...(parsed.settings || {}) },
-      quests: (parsed.quests?.length ? parsed.quests : defaultQuests).map((q) => ({ emoji: "🎯", ...q })),
-    };
-  } catch {
-    return makeFreshState(person);
-  }
+  const raw = localStorage.getItem(personKey(person));
+  if (!raw) return makeFreshState(person);
+  const parsed = safeJSONParse(raw, null);
+  if (!parsed) return makeFreshState(person);
+  return migrateState(parsed, person);
 }
 function savePersonState(person, state) {
   if (!person) return;
-  localStorage.setItem(personKey(person), JSON.stringify(state));
+  localStorage.setItem(personKey(person), JSON.stringify({ ...state, __version: STORAGE_VERSION }));
+}
+
+/* -------------------- Theme helpers -------------------- */
+function effectiveTheme(themeSetting) {
+  if (themeSetting === "light") return "light";
+  if (themeSetting === "dark") return "dark";
+  const prefersDark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+  return prefersDark ? "dark" : "light";
 }
 
 /* -------------------- Header -------------------- */
-function Header({ level, xp, nextXP, onExport, onImport, onReset, theme, setTheme }) {
+function Header({ level, xp, nextXP, onReset, theme, setTheme, onExportAllCSV }) {
   const pct = clamp(Math.round((xp / nextXP) * 100), 0, 100);
   return (
     <header className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
@@ -95,31 +130,31 @@ function Header({ level, xp, nextXP, onExport, onImport, onReset, theme, setThem
         <p className="text-sm opacity-80">Gamify your day. Rack up points. Level up your results.</p>
       </div>
       <div className="flex items-center gap-3 flex-wrap">
-        <div className="flex items-center gap-2 p-2 rounded-2xl border shadow-sm">
+        <div className="flex items-center gap-2 p-2 rounded-2xl border shadow-sm bg-white dark:bg-gray-900 border-gray-300 dark:border-gray-600">
           <span className="text-lg">🏆</span>
           <div>
             <div className="text-sm uppercase tracking-wide opacity-70">Level</div>
             <div className="font-semibold">{level}</div>
           </div>
         </div>
-        <div className="p-2 rounded-2xl border shadow-sm min-w-[220px]">
+        <div className="p-2 rounded-2xl border shadow-sm min-w-[220px] bg-white dark:bg-gray-900 border-gray-300 dark:border-gray-600">
           <div className="flex items-center justify-between text-sm opacity-80 mb-1">
             <span>XP</span>
             <span>{xp} / {nextXP}</span>
           </div>
-          <div className="w-full h-2 bg-gray-200 rounded-full overflow-hidden">
-            <div className="h-full bg-black" style={{ width: `${pct}%` }} />
+          <div className="w-full h-2 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
+            <div className="h-full bg-black dark:bg-gray-100" style={{ width: `${pct}%` }} />
           </div>
         </div>
-        <button onClick={onExport} className="px-3 py-2 rounded-xl border shadow-sm hover:shadow">Export</button>
-        <label className="px-3 py-2 rounded-xl border shadow-sm hover:shadow cursor-pointer">
-          Import
-          <input type="file" accept="application/json" className="hidden" onChange={onImport} />
-        </label>
-        <button onClick={onReset} className="px-3 py-2 rounded-xl border shadow-sm hover:shadow">Reset</button>
-        <button onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')} className="px-3 py-2 rounded-xl border shadow-sm hover:shadow">
-          {theme === 'light' ? '🌙 Dark' : '☀️ Light'}
-        </button>
+
+        <button onClick={onExportAllCSV} className={BTN}>Export All CSV</button>
+        <button onClick={onReset} className={BTN}>Reset</button>
+
+        <select value={theme} onChange={(e)=>setTheme(e.target.value)} className={CONTROL} title="Theme">
+          <option value="system">🖥️ System</option>
+          <option value="light">☀️ Light</option>
+          <option value="dark">🌙 Dark</option>
+        </select>
       </div>
     </header>
   );
@@ -154,7 +189,7 @@ function PeopleBar({ person, setPerson, profiles, setProfiles, onExportCSV }) {
 
   return (
     <div className="flex flex-wrap gap-2 items-center">
-      <select value={person} onChange={(e) => setPerson(e.target.value)} className="px-3 py-2 border rounded-xl">
+      <select value={person} onChange={(e) => setPerson(e.target.value)} className={CONTROL}>
         {profiles.length === 0 && <option value="">— Select person —</option>}
         {profiles.map((p) => (
           <option key={p} value={p}>{p}</option>
@@ -164,37 +199,52 @@ function PeopleBar({ person, setPerson, profiles, setProfiles, onExportCSV }) {
         placeholder="Add person..."
         value={newName}
         onChange={(e) => setNewName(e.target.value)}
-        className="px-3 py-2 border rounded-xl"
+        className={CONTROL}
       />
-      <button onClick={addPerson} className="px-3 py-2 rounded-xl border shadow-sm">Add</button>
+      <button onClick={addPerson} className={BTN}>Add</button>
       {!!person && (
-        <button onClick={removePerson} className="px-3 py-2 rounded-xl border shadow-sm">Remove</button>
+        <button onClick={removePerson} className={BTN}>Remove</button>
       )}
-      <button onClick={onExportCSV} className="px-3 py-2 rounded-xl border shadow-sm">Export CSV</button>
+      <button onClick={onExportCSV} className={BTN}>Export CSV</button>
     </div>
   );
 }
 
 /* -------------------- Daily Progress -------------------- */
 function DailyProgress({ historyToday, dailyGoal, onSetGoal }) {
+  // free-typing numeric input (mobile friendly)
+  const [goalDraft, setGoalDraft] = useState(String(dailyGoal));
+  useEffect(() => { setGoalDraft(String(dailyGoal)); }, [dailyGoal]);
+  const commitGoal = () => {
+    const n = parseInt(goalDraft, 10);
+    if (Number.isFinite(n) && n >= 0) onSetGoal(n);
+    else setGoalDraft(String(dailyGoal));
+  };
+
   const total = historyToday.reduce((s, h) => s + h.points, 0);
-  const pct = clamp(Math.round((total / dailyGoal) * 100), 0, 100);
+  const denom = Math.max(1, dailyGoal);
+  const pct = clamp(Math.round((total / denom) * 100), 0, 100);
+
   return (
-    <div className="p-4 rounded-2xl border shadow-sm bg-white/60">
+    <div className="p-4 rounded-2xl border shadow-sm bg-white/60 dark:bg-gray-900/60 border-gray-200 dark:border-gray-700">
       <div className="flex items-center justify-between mb-2">
         <h2 className="text-lg font-semibold">Today's Progress</h2>
         <div className="flex items-center gap-2 text-sm">
           <span>Goal:</span>
           <input
-            type="number"
-            value={dailyGoal}
-            onChange={(e) => onSetGoal(clamp(parseInt(e.target.value || 0), 10, 10000))}
-            className="w-24 px-2 py-1 border rounded-lg"
+            type="text"
+            inputMode="numeric"
+            value={goalDraft}
+            onChange={(e) => setGoalDraft(e.target.value)}
+            onBlur={commitGoal}
+            onKeyDown={(e)=>{ if(e.key==='Enter') e.currentTarget.blur(); }}
+            className={CONTROL + " w-24"}
+            placeholder="points"
           />
           <span>pts</span>
         </div>
       </div>
-      <div className="w-full h-3 bg-gray-200 rounded-full overflow-hidden">
+      <div className="w-full h-3 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
         <div className="h-full bg-green-500" style={{ width: `${pct}%` }} />
       </div>
       <div className="mt-2 text-sm opacity-80">{total} / {dailyGoal} pts</div>
@@ -205,7 +255,7 @@ function DailyProgress({ historyToday, dailyGoal, onSetGoal }) {
 /* -------------------- Quests -------------------- */
 function QuestCard({ quest, onComplete, onEdit, onDelete }) {
   return (
-    <div className="p-4 rounded-2xl border shadow-sm bg-white/70 flex flex-col gap-3">
+    <div className="p-4 rounded-2xl border shadow-sm bg-white/70 dark:bg-gray-900/70 border-gray-200 dark:border-gray-700 flex flex-col gap-3">
       <div className="flex items-start justify-between gap-3">
         <div className="flex items-center gap-3">
           <span className="text-2xl" aria-hidden>{quest.emoji || '🎯'}</span>
@@ -215,11 +265,11 @@ function QuestCard({ quest, onComplete, onEdit, onDelete }) {
           </div>
         </div>
         <div className="flex gap-2 text-xs">
-          <button onClick={() => onEdit(quest)} className="px-2 py-1 rounded-lg border hover:shadow">Edit</button>
-          <button onClick={() => onDelete(quest.id)} className="px-2 py-1 rounded-lg border hover:shadow">Del</button>
+          <button onClick={() => onEdit(quest)} className={BTN + " px-2 py-1"}>Edit</button>
+          <button onClick={() => onDelete(quest.id)} className={BTN + " px-2 py-1"}>Del</button>
         </div>
       </div>
-      <button onClick={() => onComplete(quest)} className="px-3 py-2 rounded-xl bg-black text-white hover:opacity-90">
+      <button onClick={() => onComplete(quest)} className="px-3 py-2 rounded-xl bg-black text-white hover:opacity-90 dark:bg-white dark:text-black">
         Complete +{quest.points}
       </button>
     </div>
@@ -233,21 +283,21 @@ function QuestEditor({ initial, onSave, onCancel }) {
   const [category, setCategory] = useState(initial?.category || "Sales");
   const [emoji, setEmoji] = useState(initial?.emoji || "🎯");
   return (
-    <div className="p-4 rounded-2xl border shadow-sm bg-white/70 flex flex-col gap-3">
+    <div className="p-4 rounded-2xl border shadow-sm bg-white/70 dark:bg-gray-900/70 border-gray-200 dark:border-gray-700 flex flex-col gap-3">
       <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
-        <input className="px-3 py-2 border rounded-xl" placeholder="Title" value={title} onChange={e=>setTitle(e.target.value)} />
-        <input type="number" className="px-3 py-2 border rounded-xl" placeholder="Points" value={points} onChange={e=>setPoints(parseInt(e.target.value||0))} />
-        <select className="px-3 py-2 border rounded-xl" value={category} onChange={e=>setCategory(e.target.value)}>
+        <input className={CONTROL} placeholder="Title" value={title} onChange={e=>setTitle(e.target.value)} />
+        <input type="number" className={CONTROL} placeholder="Points" value={points} onChange={e=>setPoints(parseInt(e.target.value||0,10))} />
+        <select className={CONTROL} value={category} onChange={e=>setCategory(e.target.value)}>
           <option>Sales</option><option>Marketing</option><option>Ops</option><option>Learning</option>
         </select>
-        <input className="px-3 py-2 border rounded-xl" placeholder="Emoji (optional)" value={emoji} onChange={e=>setEmoji(e.target.value)} />
+        <input className={CONTROL} placeholder="Emoji (optional)" value={emoji} onChange={e=>setEmoji(e.target.value)} />
       </div>
       <div className="flex gap-2">
         <button
-          onClick={()=>onSave({ ...(initial||{}), id: initial?.id||uid(), title, points: clamp(points||0,1,1000), category, emoji})}
-          className="px-3 py-2 rounded-xl bg-black text-white"
+          onClick={()=>onSave({ ...(initial||{}), id: initial?.id||uid(), title, points: clamp(points||0,0,1000), category, emoji})}
+          className="px-3 py-2 rounded-xl bg-black text-white dark:bg-white dark:text-black"
         >Save</button>
-        <button onClick={onCancel} className="px-3 py-2 rounded-xl border">Cancel</button>
+        <button onClick={onCancel} className={BTN}>Cancel</button>
       </div>
     </div>
   );
@@ -256,7 +306,7 @@ function QuestEditor({ initial, onSave, onCancel }) {
 /* -------------------- History -------------------- */
 function History({ history }) {
   return (
-    <div className="p-4 rounded-2xl border shadow-sm bg-white/60">
+    <div className="p-4 rounded-2xl border shadow-sm bg-white/60 dark:bg-gray-900/60 border-gray-200 dark:border-gray-700">
       <h3 className="font-semibold mb-3">Today's Activity</h3>
       {history.length === 0 && <div className="text-sm opacity-70">No activity yet. Complete a quest!</div>}
       <ul className="space-y-2">
@@ -286,7 +336,7 @@ function Stats({ allHistory, streak, level }) {
     return { sum7 };
   }, [allHistory]);
   return (
-    <div className="p-4 rounded-2xl border shadow-sm bg-white/60 flex flex-col gap-2">
+    <div className="p-4 rounded-2xl border shadow-sm bg-white/60 dark:bg-gray-900/60 border-gray-200 dark:border-gray-700 flex flex-col gap-2">
       <h3 className="font-semibold">Stats</h3>
       <div className="text-sm">Current streak: <span className="font-semibold">{streak}</span> day{streak===1?'':'s'}</div>
       <div className="text-sm">Level: <span className="font-semibold">{level}</span></div>
@@ -308,11 +358,11 @@ function Badges({ allHistory, level, dailyGoal }) {
   ];
 
   return (
-    <div className="p-4 rounded-2xl border shadow-sm bg-white/60">
+    <div className="p-4 rounded-2xl border shadow-sm bg-white/60 dark:bg-gray-900/60 border-gray-200 dark:border-gray-700">
       <h3 className="font-semibold mb-2">Badges</h3>
       <div className="flex flex-wrap gap-2">
         {badges.map(b => (
-          <div key={b.id} className={`px-3 py-2 rounded-xl border shadow-sm text-sm ${b.earned ? 'bg-amber-100' : 'opacity-50'}`}>
+          <div key={b.id} className={`px-3 py-2 rounded-xl border shadow-sm text-sm ${b.earned ? 'bg-amber-100 dark:bg-amber-900/40' : 'opacity-70'} border-gray-300 dark:border-gray-600`}>
             <span className="mr-1">{b.emoji}</span>{b.label}
           </div>
         ))}
@@ -321,78 +371,84 @@ function Badges({ allHistory, level, dailyGoal }) {
   );
 }
 
-/* -------------------- Timer (mobile-safe + reward) -------------------- */
-function Timer({ settings, onFocusComplete }) {
+/* -------------------- Timer (mobile-safe, no duplicate awards) -------------------- */
+function Timer({ settings, onTimerComplete }) {
   const [mode, setMode] = useState('work'); // work | short | long
   const [seconds, setSeconds] = useState(settings.pomodoroMinutes * 60);
   const [running, setRunning] = useState(false);
-  const justCompletedRef = React.useRef(false); // avoid duplicate awards at 0
+  const firedRef = useRef(false); // prevents duplicate on iOS timers
 
+  // one-time ask (non-blocking) so Notification won't trigger alerts later
+  useEffect(() => {
+    if ("Notification" in window && Notification.permission === "default") {
+      try { Notification.requestPermission().catch(() => {}); } catch {}
+    }
+  }, []);
+
+  // tick
   useEffect(() => {
     let t;
-    if (running) t = setInterval(() => setSeconds((s) => Math.max(0, s - 1)), 1000);
+    if (running) t = setInterval(() => setSeconds(s => Math.max(0, s - 1)), 1000);
     return () => clearInterval(t);
   }, [running]);
 
+  // expiry
   useEffect(() => {
-    if (seconds === 0 && !justCompletedRef.current) {
-      justCompletedRef.current = true;
-      setRunning(false);
+    if (seconds > 0) return;
+    if (firedRef.current) return; // already handled
+    firedRef.current = true;
+    setRunning(false);
 
-      // Subtle mobile feedback, all guarded
-      try { if (navigator.vibrate) navigator.vibrate(200); } catch {}
-      try {
-        const a = new Audio("data:audio/wav;base64,UklGRkQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABYAAAACAAACAAA=");
-        a.play().catch(() => {});
-      } catch {}
+    // light feedback that won't lock UI
+    try { if (navigator.vibrate) navigator.vibrate(200); } catch {}
+    try {
+      const a = new Audio("data:audio/wav;base64,UklGRkQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABYAAAACAAACAAA=");
+      a.play().catch(() => {});
+    } catch {}
 
-      if (mode === 'work' && typeof onFocusComplete === 'function') {
-        onFocusComplete();
+    // optional desktop notification only (no alert fallback → avoids white-screen on mobile)
+    try {
+      if ("Notification" in window && Notification.permission === "granted") {
+        const title = mode === 'work' ? "Work block done" : mode === 'short' ? "Short break over" : "Long break over";
+        new Notification(title, { body: "Logged your points." });
       }
-    }
-  }, [seconds, mode, onFocusComplete]);
+    } catch {}
+
+    onTimerComplete(mode);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [seconds, mode]);
 
   const resetTo = (m) => {
     setMode(m);
-    const mins = m === 'work' ? settings.pomodoroMinutes
-               : m === 'short' ? settings.shortBreakMinutes
-               : settings.longBreakMinutes;
+    const mins = m==='work'? settings.pomodoroMinutes : m==='short'? settings.shortBreakMinutes : settings.longBreakMinutes;
     setSeconds(mins * 60);
     setRunning(false);
-    justCompletedRef.current = false;
+    firedRef.current = false;
   };
 
-  const mm = String(Math.floor(seconds / 60)).padStart(2, '0');
-  const ss = String(seconds % 60).padStart(2, '0');
+  // also clear "fired" if we add a second (e.g., Start/Reset before hitting 0)
+  useEffect(() => {
+    if (seconds > 0) firedRef.current = false;
+  }, [seconds]);
+
+  const mm = String(Math.floor(seconds/60)).padStart(2,'0');
+  const ss = String(seconds%60).padStart(2,'0');
 
   return (
-    <div className="p-4 rounded-2xl border shadow-sm bg-white/60">
+    <div className="p-4 rounded-2xl border shadow-sm bg-white/60 dark:bg-gray-900/60 border-gray-200 dark:border-gray-700">
       <h3 className="font-semibold mb-2">Focus Timer</h3>
       <div className="flex gap-2 mb-3">
-        <button onClick={() => resetTo('work')}
-          className={`px-3 py-1 rounded-lg border ${mode === 'work' ? 'bg-black text-white' : ''}`}>
-          Work
-        </button>
-        <button onClick={() => resetTo('short')}
-          className={`px-3 py-1 rounded-lg border ${mode === 'short' ? 'bg-black text-white' : ''}`}>
-          Short
-        </button>
-        <button onClick={() => resetTo('long')}
-          className={`px-3 py-1 rounded-lg border ${mode === 'long' ? 'bg-black text-white' : ''}`}>
-          Long
-        </button>
+        <button onClick={()=>resetTo('work')}  className={`${BTN} ${mode==='work'  ? '!bg-black !text-white dark:!bg-white dark:!text-black' : ''}`}>Work</button>
+        <button onClick={()=>resetTo('short')} className={`${BTN} ${mode==='short' ? '!bg-black !text-white dark:!bg-white dark:!text-black' : ''}`}>Short</button>
+        <button onClick={()=>resetTo('long')}  className={`${BTN} ${mode==='long'  ? '!bg-black !text-white dark:!bg-white dark:!text-black' : ''}`}>Long</button>
       </div>
       <div className="text-4xl font-bold text-center mb-3">{mm}:{ss}</div>
       <div className="flex gap-2 justify-center">
-        <button onClick={() => setRunning(r => !r)} className="px-3 py-2 rounded-xl border">
-          {running ? 'Pause' : 'Start'}
-        </button>
-        <button onClick={() => resetTo(mode)} className="px-3 py-2 rounded-xl border">Reset</button>
+        <button onClick={()=>setRunning(r=>!r)} className={BTN}>{running? 'Pause' : 'Start'}</button>
+        <button onClick={()=>resetTo(mode)} className={BTN}>Reset</button>
       </div>
       {mode === 'work' && (
-        <div className="text-xs opacity-70 mt-2 text-center">
-          Completes → +{settings.timerRewardPoints} pts
-        </div>
+        <div className="text-xs opacity-70 mt-2 text-center">Completing awards +25</div>
       )}
     </div>
   );
@@ -421,10 +477,10 @@ function Leaderboard({ profiles }) {
   }, [profiles, range]);
 
   return (
-    <div className="p-4 rounded-2xl border shadow-sm bg-white/60">
+    <div className="p-4 rounded-2xl border shadow-sm bg-white/60 dark:bg-gray-900/60 border-gray-200 dark:border-gray-700">
       <div className="flex items-center justify-between">
         <h3 className="font-semibold">Leaderboard</h3>
-        <select className="px-2 py-1 border rounded" value={range} onChange={(e)=>setRange(e.target.value)}>
+        <select className={CONTROL} value={range} onChange={(e)=>setRange(e.target.value)}>
           <option value="week">Last 7 days</option>
           <option value="month">Last 30 days</option>
         </select>
@@ -435,7 +491,7 @@ function Leaderboard({ profiles }) {
         </thead>
         <tbody>
           {rows.map((r, i) => (
-            <tr key={r.name} className="border-t">
+            <tr key={r.name} className="border-t border-gray-200 dark:border-gray-700">
               <td className="py-1">{i+1}</td>
               <td>{r.name}</td>
               <td className="text-right font-semibold">{r.points}</td>
@@ -454,144 +510,121 @@ export default function App() {
   const [profiles, setProfiles] = useState(loadProfiles());
   const [person, setPerson] = useState(profiles[0] || "");
   const [state, setState] = useState(() => loadPersonState(person));
+  const [undoStack, setUndoStack] = useState([]);
 
-  // ✅ "today" that auto-refreshes after midnight so Progress resets
+  // ✅ auto-updating "today" so progress resets after midnight
   const [today, setToday] = useState(todayISO());
   useEffect(() => {
     const id = setInterval(() => {
       const t = todayISO();
       if (t !== today) setToday(t);
-    }, 60 * 1000); // check once a minute
+    }, 60 * 1000);
     return () => clearInterval(id);
   }, [today]);
 
-  // Theme class on <html>
+  // Apply effective theme + watch OS changes when using "system"
   useEffect(() => {
-    document.documentElement.classList.toggle('dark', state.settings.theme === 'dark');
+    const apply = () => {
+      const eff = effectiveTheme(state.settings.theme);
+      document.documentElement.classList.toggle('dark', eff === 'dark');
+    };
+    apply();
+    let mql;
+    if (state.settings.theme === 'system' && window.matchMedia) {
+      mql = window.matchMedia('(prefers-color-scheme: dark)');
+      const handler = () => apply();
+      mql.addEventListener ? mql.addEventListener('change', handler) : mql.addListener(handler);
+      return () => {
+        mql?.removeEventListener ? mql.removeEventListener('change', handler) : mql?.removeListener?.(handler);
+      };
+    }
   }, [state.settings.theme]);
 
-  // Switch person
-  useEffect(() => {
-    if (!person) return;
-    setState(loadPersonState(person));
-  }, [person]);
+  // Switch person & persist
+  useEffect(() => { if (person) setState(loadPersonState(person)); }, [person]);
+  useEffect(() => { if (person) savePersonState(person, state); }, [person, state]);
 
-  // Persist current person's state
-  useEffect(() => {
-    if (!person) return;
-    savePersonState(person, state);
-  }, [person, state]);
-
-  // Derived
   const { settings, quests, history, xp, level, streak, lastGoalDate } = state;
-  const dateToday = today;                                                       // 👈 use auto-updating today
-  const historyToday = useMemo(() => history.filter(h => h.date === dateToday), [history, dateToday]);
+  const dateToday = today; // 👈 use the auto-updating date
+  const historyToday = useMemo(
+    () => history.filter(h => h.date === dateToday).sort((a,b)=>b.timestamp-a.timestamp),
+    [history, dateToday]
+  );
   const nextXP = useMemo(() => xpForLevel(level), [level]);
 
-  // Complete quest (local + cloud)
-  const completeQuest = async (q) => {
-    if (!person) {
-      alert("Select or add a person first.");
-      return;
-    }
+  // Central entry add (used by quests + timer)
+  const addEntry = async ({ title, category, points, emoji, questId=null }) => {
+    if (!person) { alert("Select or add a person first."); return; }
 
     const entry = {
       id: uid(),
       date: dateToday,
-      questId: q.id,
-      title: q.title,
-      category: q.category,
-      points: q.points,
-      emoji: q.emoji,
+      questId,
+      title,
+      category: category || "General",
+      points,
+      emoji,
       timestamp: Date.now()
     };
+
     const newHistory = [...history, entry];
-    const newXP = xp + q.points;
+    const newXP = xp + points;
 
-    // Level-up math
-    let newLevel = level;
-    let remainder = newXP;
-    let needed = xpForLevel(newLevel);
-    while (remainder >= needed) {
-      remainder -= needed;
-      newLevel += 1;
-      needed = xpForLevel(newLevel);
-    }
+    // Level-up
+    let newLevel = level, remainder = newXP, needed = xpForLevel(newLevel);
+    while (remainder >= needed) { remainder -= needed; newLevel += 1; needed = xpForLevel(newLevel); }
 
-    // Streak logic
-    const totalToday = newHistory
-      .filter(h => h.date === dateToday)
-      .reduce((s, h) => s + h.points, 0);
-
-    let newStreak = streak;
-    let newLastGoalDate = lastGoalDate;
+    // Streak
+    const totalToday = newHistory.filter(h => h.date === dateToday).reduce((s, h) => s + h.points, 0);
+    let newStreak = streak, newLastGoalDate = lastGoalDate;
     if (totalToday >= settings.dailyGoal && lastGoalDate !== dateToday) {
-      const y = new Date(dateToday);
-      y.setDate(y.getDate() - 1);
+      const y = new Date(dateToday); y.setDate(y.getDate() - 1);
       const yISO = y.toISOString().slice(0, 10);
       newStreak = (lastGoalDate === yISO) ? streak + 1 : 1;
       newLastGoalDate = dateToday;
     }
 
     // Save locally
-    setState({
-      ...state,
-      history: newHistory,
-      xp: newXP,
-      level: newLevel,
-      streak: newStreak,
-      lastGoalDate: newLastGoalDate,
-      name: person
-    });
+    const prev = state;
+    const next = { ...state, history: newHistory, xp: newXP, level: newLevel, streak: newStreak, lastGoalDate: newLastGoalDate, name: person };
+    setState(next);
+    setUndoStack((st)=>[{ entry, prev }, ...st].slice(0, 25));
 
-    // Save to Google Sheet (central) — optional
+    // Save to Google Sheet (central)
     try {
-      if (typeof saveActivityToSheet === "function") {
-        await saveActivityToSheet({
-          name: person,
-          date: dateToday,
-          title: q.title,
-          category: q.category || "General",
-          points: q.points,
-          timestamp: Date.now()
-        });
-      }
+      await saveActivityToSheet({
+        name: person,
+        date: dateToday,
+        title,
+        category: category || "General",
+        points,
+        timestamp: entry.timestamp
+      });
     } catch (err) {
       console.warn("Could not save to Google Sheet:", err);
     }
   };
 
+  // Complete quest
+  const completeQuest = (q) => addEntry({ title: q.title, category: q.category, points: q.points, emoji: q.emoji, questId: q.id });
+
+  // Quests CRUD
   const addQuest = (q) => setState(s => ({ ...s, quests: [q, ...s.quests] }));
   const updateQuest = (q) => setState(s => ({ ...s, quests: s.quests.map(x => x.id===q.id? q : x) }));
   const deleteQuest = (id) => setState(s => ({ ...s, quests: s.quests.filter(q => q.id!==id) }));
-  const setDailyGoal = (val) => setState(s => ({ ...s, settings: { ...s.settings, dailyGoal: val }}));
 
-  // Export / Import (per-person)
-  const doExport = () => {
-    if (!person) return alert("Select a person first.");
-    const blob = new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = `sm-game-${person}-${todayISO()}.json`; a.click();
-    URL.revokeObjectURL(url);
+  // Daily goal setter
+  const setDailyGoal = (val) => {
+    const n = Number.isFinite(val) ? Math.max(0, val) : 0;
+    setState(s => ({ ...s, settings: { ...s.settings, dailyGoal: n }}));
   };
-  const doImport = (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      try {
-        const data = JSON.parse(reader.result);
-        const merged = { ...makeFreshState(person), ...data, name: person, settings: { ...defaultSettings, ...(data.settings||{}) } };
-        setState(merged);
-      } catch { alert('Invalid JSON'); }
-    };
-    reader.readAsText(file);
-  };
+
+  // Reset & exports
   const doReset = () => {
     if (!person) return alert("Select a person first.");
     if (confirm(`Reset all data for ${person}?`)) setState(makeFreshState(person));
   };
+
   const exportCSV = () => {
     if (!person) return alert("Select a person first.");
     const rows = [
@@ -606,11 +639,35 @@ export default function App() {
     URL.revokeObjectURL(a.href);
   };
 
+  function exportAllProfilesCSV() {
+    const profs = loadProfiles();
+    const rows = [["person","date","time","title","category","points","level","streak"]];
+    for (const p of profs) {
+      const s = loadPersonState(p);
+      for (const h of s.history || []) {
+        rows.push([p, h.date, new Date(h.timestamp).toLocaleTimeString(), h.title, h.category||"", h.points, s.level, s.streak]);
+      }
+    }
+    const csv = rows.map(r=>r.map(x=>`"${String(x).replace(/"/g,'""')}"`).join(",")).join("\n");
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([csv], {type:"text/csv"}));
+    a.download = `sm-game-all-${todayISO()}.csv`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
+
   // UI filters
   const [editing, setEditing] = useState(null);
   const [tab, setTab] = useState('All');
   const categories = ['All', ...Array.from(new Set(quests.map(q=>q.category)))];
   const filteredQuests = quests.filter(q => tab==='All' || q.category===tab);
+
+  // Focus timer completion → award points
+  const handleTimerComplete = (mode) => {
+    const points = mode === 'work' ? 25 : mode === 'short' ? 5 : 15;
+    const title = mode === 'work' ? "Focus block (Work)" : mode === 'short' ? "Focus block (Short break)" : "Focus block (Long break)";
+    addEntry({ title, category: "Ops", points, emoji: "⏱️" });
+  };
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-gray-50 to-gray-100 dark:from-gray-900 dark:to-black text-gray-900 dark:text-gray-100">
@@ -621,11 +678,10 @@ export default function App() {
             level={level}
             xp={xp % nextXP}
             nextXP={nextXP}
-            onExport={doExport}
-            onImport={doImport}
             onReset={doReset}
             theme={state.settings.theme}
             setTheme={(t)=>setState(s=>({...s, settings:{...s.settings, theme:t}}))}
+            onExportAllCSV={exportAllProfilesCSV}
           />
           <PeopleBar
             person={person}
@@ -644,9 +700,11 @@ export default function App() {
             {/* Tabs & New quest */}
             <div className="flex flex-wrap gap-2">
               {categories.map(c => (
-                <button key={c} onClick={()=>setTab(c)} className={`px-3 py-2 rounded-xl border shadow-sm text-sm ${tab===c? 'bg-black text-white':''}`}>{c}</button>
+                <button key={c} onClick={()=>setTab(c)} className={TAB_BTN + (tab===c?' !bg-black !text-white dark:!bg-white dark:!text-black':'')}>
+                  {c}
+                </button>
               ))}
-              <button onClick={()=>setEditing({})} className="px-3 py-2 rounded-xl border shadow-sm text-sm">+ New Quest</button>
+              <button onClick={()=>setEditing({})} className={TAB_BTN}>+ New Quest</button>
             </div>
 
             {editing && (
@@ -664,7 +722,7 @@ export default function App() {
               ))}
             </div>
 
-            <History history={historyToday.sort((a,b)=>b.timestamp-a.timestamp)} />
+            <History history={historyToday} />
 
             {/* Local leaderboard across profiles */}
             <Leaderboard profiles={profiles} />
@@ -674,20 +732,9 @@ export default function App() {
           <div className="space-y-6">
             <Stats allHistory={history} streak={streak} level={level} />
             <Badges allHistory={history} level={level} dailyGoal={settings.dailyGoal} />
-            <Timer
-              settings={settings}
-              onFocusComplete={() =>
-                completeQuest({
-                  id: uid(),
-                  title: `Focus block (${settings.pomodoroMinutes}m)`,
-                  points: settings.timerRewardPoints || 5,
-                  category: "Focus",
-                  emoji: "⏱️",
-                })
-              }
-            />
+            <Timer settings={settings} onTimerComplete={handleTimerComplete} />
 
-            <div className="p-4 rounded-2xl border shadow-sm bg-white/60">
+            <div className="p-4 rounded-2xl border shadow-sm bg-white/60 dark:bg-gray-900/60 border-gray-200 dark:border-gray-700">
               <h3 className="font-semibold mb-2">Tips</h3>
               <ul className="list-disc ml-5 text-sm space-y-1 opacity-90">
                 <li>Weight high-impact actions with higher points.</li>
@@ -699,7 +746,7 @@ export default function App() {
           </div>
         </div>
 
-        <footer className="text-xs opacity-60 mt-10">Multi-user • Local leaderboard • Per-person Export/Import</footer>
+        <footer className="text-xs opacity-60 mt-10">Multi-user • Local leaderboard • Per-person Export CSV • Export All Profiles</footer>
       </div>
     </div>
   );
