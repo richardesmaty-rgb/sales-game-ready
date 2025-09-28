@@ -2,13 +2,12 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { saveActivityToSheet } from "./cloud";
 
 /**
- * Sales & Marketing Productivity Game (mobile polished)
- * - High-contrast controls / dark-mode
- * - Theme: light | dark | system
- * - Export CSV (person + all)
+ * Sales & Marketing Productivity Game (mobile-friendly)
+ * - Weekly level reset (keeps history/streaks, resets only level & XP)
+ * - High-contrast form controls for mobile/dark mode
+ * - Goal box allows free typing (any non-negative int)
+ * - System theme (light/dark/system), Export All CSV
  * - Focus Timer awards: Work +25, Short +5, Long +15
- * - FIX: reliable mobile timer awards + no white-screen alerts
- * - FIX: today's progress rolls over after midnight
  */
 
 /* -------------------- UI class helpers -------------------- */
@@ -36,6 +35,24 @@ const clamp = (n, min, max) => Math.max(min, Math.min(max, n));
 const uid = () => Math.random().toString(36).slice(2, 9);
 const xpForLevel = (level) => 100 + (level - 1) * 75;
 function safeJSONParse(str, fallback) { try { return JSON.parse(str); } catch { return fallback; } }
+
+/** ISO week key like "2025-W09" (Monday-based weeks) */
+function isoWeekKey(d = new Date()) {
+  const date = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
+  const dayNum = (date.getUTCDay() + 6) % 7;          // Mon=0..Sun=6
+  date.setUTCDate(date.getUTCDate() - dayNum + 3);    // Thursday in current week
+  const week1 = new Date(Date.UTC(date.getUTCFullYear(), 0, 4));
+  const weekNo = 1 + Math.round(
+    ((date - week1) / 86400000 - 3 + ((week1.getUTCDay() + 6) % 7)) / 7
+  );
+  const year = date.getUTCFullYear();
+  return `${year}-W${String(weekNo).padStart(2, "0")}`;
+}
+
+/* --- Weekly reset configuration --- */
+const RESET_LEVEL_AT_WEEK_START = true; // set false to disable
+const WEEKLY_RESET_LEVEL = 1;           // set to 0 if you prefer "Level 0"
+const WEEKLY_RESET_XP = 0;              // XP progress resets with level
 
 /* -------------------- Defaults -------------------- */
 const defaultQuests = [
@@ -70,6 +87,7 @@ const makeFreshState = (name = "") => ({
   level: 1,
   streak: 0,
   lastGoalDate: null,
+  weekKey: isoWeekKey(), // used for weekly level reset
 });
 
 /* -------------------- Local Storage (multi-user) -------------------- */
@@ -97,6 +115,7 @@ function migrateState(parsed, person) {
     name: person,
     settings,
     quests,
+    weekKey: parsed.weekKey || base.weekKey, // ensure present for weekly reset
   };
 }
 function loadPersonState(person) {
@@ -150,7 +169,12 @@ function Header({ level, xp, nextXP, onReset, theme, setTheme, onExportAllCSV })
         <button onClick={onExportAllCSV} className={BTN}>Export All CSV</button>
         <button onClick={onReset} className={BTN}>Reset</button>
 
-        <select value={theme} onChange={(e)=>setTheme(e.target.value)} className={CONTROL} title="Theme">
+        <select
+          value={theme}
+          onChange={(e)=>setTheme(e.target.value)}
+          className={CONTROL}
+          title="Theme"
+        >
           <option value="system">🖥️ System</option>
           <option value="light">☀️ Light</option>
           <option value="dark">🌙 Dark</option>
@@ -212,9 +236,9 @@ function PeopleBar({ person, setPerson, profiles, setProfiles, onExportCSV }) {
 
 /* -------------------- Daily Progress -------------------- */
 function DailyProgress({ historyToday, dailyGoal, onSetGoal }) {
-  // free-typing numeric input (mobile friendly)
   const [goalDraft, setGoalDraft] = useState(String(dailyGoal));
   useEffect(() => { setGoalDraft(String(dailyGoal)); }, [dailyGoal]);
+
   const commitGoal = () => {
     const n = parseInt(goalDraft, 10);
     if (Number.isFinite(n) && n >= 0) onSetGoal(n);
@@ -237,7 +261,7 @@ function DailyProgress({ historyToday, dailyGoal, onSetGoal }) {
             value={goalDraft}
             onChange={(e) => setGoalDraft(e.target.value)}
             onBlur={commitGoal}
-            onKeyDown={(e)=>{ if(e.key==='Enter') e.currentTarget.blur(); }}
+            onKeyDown={(e)=>{ if(e.key==='Enter') { e.currentTarget.blur(); }}}
             className={CONTROL + " w-24"}
             placeholder="points"
           />
@@ -371,66 +395,49 @@ function Badges({ allHistory, level, dailyGoal }) {
   );
 }
 
-/* -------------------- Timer (mobile-safe, no duplicate awards) -------------------- */
+/* -------------------- Timer -------------------- */
 function Timer({ settings, onTimerComplete }) {
   const [mode, setMode] = useState('work'); // work | short | long
   const [seconds, setSeconds] = useState(settings.pomodoroMinutes * 60);
   const [running, setRunning] = useState(false);
-  const firedRef = useRef(false); // prevents duplicate on iOS timers
+  const notifRef = useRef(null);
 
-  // one-time ask (non-blocking) so Notification won't trigger alerts later
-  useEffect(() => {
-    if ("Notification" in window && Notification.permission === "default") {
-      try { Notification.requestPermission().catch(() => {}); } catch {}
-    }
-  }, []);
-
-  // tick
   useEffect(() => {
     let t;
-    if (running) t = setInterval(() => setSeconds(s => Math.max(0, s - 1)), 1000);
+    if (running) t = setInterval(() => setSeconds(s => Math.max(0, s-1)), 1000);
     return () => clearInterval(t);
   }, [running]);
 
-  // expiry
   useEffect(() => {
-    if (seconds > 0) return;
-    if (firedRef.current) return; // already handled
-    firedRef.current = true;
-    setRunning(false);
+    if (seconds !== 0) return;
+    if (running) setRunning(false);
 
-    // light feedback that won't lock UI
-    try { if (navigator.vibrate) navigator.vibrate(200); } catch {}
-    try {
-      const a = new Audio("data:audio/wav;base64,UklGRkQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABYAAAACAAACAAA=");
-      a.play().catch(() => {});
-    } catch {}
+    try { new Audio("data:audio/wav;base64,UklGRkQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABYAAAACAAACAAA=").play(); } catch {}
 
-    // optional desktop notification only (no alert fallback → avoids white-screen on mobile)
-    try {
-      if ("Notification" in window && Notification.permission === "granted") {
-        const title = mode === 'work' ? "Work block done" : mode === 'short' ? "Short break over" : "Long break over";
-        new Notification(title, { body: "Logged your points." });
+    const title = mode === 'work' ? "Work block done" : mode === 'short' ? "Short break over" : "Long break over";
+    const body = "Nice! Logging points now.";
+    if ("Notification" in window) {
+      if (Notification.permission === "granted") {
+        notifRef.current = new Notification(title, { body });
+      } else if (Notification.permission === "default") {
+        Notification.requestPermission().then(p => { if (p === "granted") notifRef.current = new Notification(title, { body }); });
+      } else {
+        alert(`${title} — Logging points.`);
       }
-    } catch {}
+    } else {
+      alert(`${title} — Logging points.`);
+    }
 
     onTimerComplete(mode);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [seconds, mode]);
+  }, [seconds]);
 
   const resetTo = (m) => {
     setMode(m);
     const mins = m==='work'? settings.pomodoroMinutes : m==='short'? settings.shortBreakMinutes : settings.longBreakMinutes;
-    setSeconds(mins * 60);
+    setSeconds(mins*60);
     setRunning(false);
-    firedRef.current = false;
   };
-
-  // also clear "fired" if we add a second (e.g., Start/Reset before hitting 0)
-  useEffect(() => {
-    if (seconds > 0) firedRef.current = false;
-  }, [seconds]);
-
   const mm = String(Math.floor(seconds/60)).padStart(2,'0');
   const ss = String(seconds%60).padStart(2,'0');
 
@@ -438,18 +445,15 @@ function Timer({ settings, onTimerComplete }) {
     <div className="p-4 rounded-2xl border shadow-sm bg-white/60 dark:bg-gray-900/60 border-gray-200 dark:border-gray-700">
       <h3 className="font-semibold mb-2">Focus Timer</h3>
       <div className="flex gap-2 mb-3">
-        <button onClick={()=>resetTo('work')}  className={`${BTN} ${mode==='work'  ? '!bg-black !text-white dark:!bg-white dark:!text-black' : ''}`}>Work</button>
-        <button onClick={()=>resetTo('short')} className={`${BTN} ${mode==='short' ? '!bg-black !text-white dark:!bg-white dark:!text-black' : ''}`}>Short</button>
-        <button onClick={()=>resetTo('long')}  className={`${BTN} ${mode==='long'  ? '!bg-black !text-white dark:!bg-white dark:!text-black' : ''}`}>Long</button>
+        <button onClick={()=>resetTo('work')} className={`${BTN} ${mode==='work'?'!bg-black !text-white dark:!bg-white dark:!text-black':''}`}>Work</button>
+        <button onClick={()=>resetTo('short')} className={`${BTN} ${mode==='short'?'!bg-black !text-white dark:!bg-white dark:!text-black':''}`}>Short</button>
+        <button onClick={()=>resetTo('long')} className={`${BTN} ${mode==='long'?'!bg-black !text-white dark:!bg-white dark:!text-black':''}`}>Long</button>
       </div>
       <div className="text-4xl font-bold text-center mb-3">{mm}:{ss}</div>
       <div className="flex gap-2 justify-center">
         <button onClick={()=>setRunning(r=>!r)} className={BTN}>{running? 'Pause' : 'Start'}</button>
         <button onClick={()=>resetTo(mode)} className={BTN}>Reset</button>
       </div>
-      {mode === 'work' && (
-        <div className="text-xs opacity-70 mt-2 text-center">Completing awards +25</div>
-      )}
     </div>
   );
 }
@@ -506,23 +510,12 @@ function Leaderboard({ profiles }) {
 
 /* -------------------- MAIN APP -------------------- */
 export default function App() {
-  // Multi-user wiring
   const [profiles, setProfiles] = useState(loadProfiles());
   const [person, setPerson] = useState(profiles[0] || "");
   const [state, setState] = useState(() => loadPersonState(person));
-  const [undoStack, setUndoStack] = useState([]);
+  const [undoStack, setUndoStack] = useState([]); // kept for future use
 
-  // ✅ auto-updating "today" so progress resets after midnight
-  const [today, setToday] = useState(todayISO());
-  useEffect(() => {
-    const id = setInterval(() => {
-      const t = todayISO();
-      if (t !== today) setToday(t);
-    }, 60 * 1000);
-    return () => clearInterval(id);
-  }, [today]);
-
-  // Apply effective theme + watch OS changes when using "system"
+  // Theme application
   useEffect(() => {
     const apply = () => {
       const eff = effectiveTheme(state.settings.theme);
@@ -535,7 +528,7 @@ export default function App() {
       const handler = () => apply();
       mql.addEventListener ? mql.addEventListener('change', handler) : mql.addListener(handler);
       return () => {
-        mql?.removeEventListener ? mql.removeEventListener('change', handler) : mql?.removeListener?.(handler);
+        mql.removeEventListener ? mql.removeEventListener('change', handler) : mql.removeListener(handler);
       };
     }
   }, [state.settings.theme]);
@@ -544,12 +537,18 @@ export default function App() {
   useEffect(() => { if (person) setState(loadPersonState(person)); }, [person]);
   useEffect(() => { if (person) savePersonState(person, state); }, [person, state]);
 
+  // Weekly level reset
+  useEffect(() => {
+    if (!RESET_LEVEL_AT_WEEK_START || !person) return;
+    const nowKey = isoWeekKey(new Date());
+    if (state.weekKey !== nowKey) {
+      setState(s => ({ ...s, level: WEEKLY_RESET_LEVEL, xp: WEEKLY_RESET_XP, weekKey: nowKey }));
+    }
+  }, [person, state.weekKey]);
+
   const { settings, quests, history, xp, level, streak, lastGoalDate } = state;
-  const dateToday = today; // 👈 use the auto-updating date
-  const historyToday = useMemo(
-    () => history.filter(h => h.date === dateToday).sort((a,b)=>b.timestamp-a.timestamp),
-    [history, dateToday]
-  );
+  const dateToday = todayISO();
+  const historyToday = useMemo(() => history.filter(h => h.date === dateToday).sort((a,b)=>b.timestamp-a.timestamp), [history, dateToday]);
   const nextXP = useMemo(() => xpForLevel(level), [level]);
 
   // Central entry add (used by quests + timer)
@@ -570,13 +569,20 @@ export default function App() {
     const newHistory = [...history, entry];
     const newXP = xp + points;
 
-    // Level-up
-    let newLevel = level, remainder = newXP, needed = xpForLevel(newLevel);
-    while (remainder >= needed) { remainder -= needed; newLevel += 1; needed = xpForLevel(newLevel); }
+    // Level-up math
+    let newLevel = level;
+    let remainder = newXP;
+    let needed = xpForLevel(newLevel);
+    while (remainder >= needed) {
+      remainder -= needed;
+      newLevel += 1;
+      needed = xpForLevel(newLevel);
+    }
 
-    // Streak
+    // Streak logic
     const totalToday = newHistory.filter(h => h.date === dateToday).reduce((s, h) => s + h.points, 0);
-    let newStreak = streak, newLastGoalDate = lastGoalDate;
+    let newStreak = streak;
+    let newLastGoalDate = lastGoalDate;
     if (totalToday >= settings.dailyGoal && lastGoalDate !== dateToday) {
       const y = new Date(dateToday); y.setDate(y.getDate() - 1);
       const yISO = y.toISOString().slice(0, 10);
@@ -588,6 +594,7 @@ export default function App() {
     const prev = state;
     const next = { ...state, history: newHistory, xp: newXP, level: newLevel, streak: newStreak, lastGoalDate: newLastGoalDate, name: person };
     setState(next);
+
     setUndoStack((st)=>[{ entry, prev }, ...st].slice(0, 25));
 
     // Save to Google Sheet (central)
@@ -613,7 +620,7 @@ export default function App() {
   const updateQuest = (q) => setState(s => ({ ...s, quests: s.quests.map(x => x.id===q.id? q : x) }));
   const deleteQuest = (id) => setState(s => ({ ...s, quests: s.quests.filter(q => q.id!==id) }));
 
-  // Daily goal setter
+  // Daily goal setter (accept any non-negative int)
   const setDailyGoal = (val) => {
     const n = Number.isFinite(val) ? Math.max(0, val) : 0;
     setState(s => ({ ...s, settings: { ...s.settings, dailyGoal: n }}));
@@ -641,11 +648,20 @@ export default function App() {
 
   function exportAllProfilesCSV() {
     const profs = loadProfiles();
-    const rows = [["person","date","time","title","category","points","level","streak"]];
+    const rows = [["person","date","time","title","category","points","level","streak"]]];
     for (const p of profs) {
       const s = loadPersonState(p);
       for (const h of s.history || []) {
-        rows.push([p, h.date, new Date(h.timestamp).toLocaleTimeString(), h.title, h.category||"", h.points, s.level, s.streak]);
+        rows.push([
+          p,
+          h.date,
+          new Date(h.timestamp).toLocaleTimeString(),
+          h.title,
+          h.category||"",
+          h.points,
+          s.level,
+          s.streak
+        ]);
       }
     }
     const csv = rows.map(r=>r.map(x=>`"${String(x).replace(/"/g,'""')}"`).join(",")).join("\n");
