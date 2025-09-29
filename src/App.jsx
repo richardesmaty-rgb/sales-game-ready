@@ -2,12 +2,10 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { saveActivityToSheet } from "./cloud";
 
 /**
- * Sales & Marketing Productivity Game (mobile-friendly)
- * - Weekly level reset (keeps history/streaks, resets only level & XP)
- * - High-contrast form controls for mobile/dark mode
- * - Goal box allows free typing (any non-negative int)
- * - System theme (light/dark/system), Export All CSV
- * - Focus Timer awards: Work +25, Short +5, Long +15
+ * Sales & Marketing Productivity Game (mobile-optimized)
+ * - Soft Weekly Reset: only Level → 1 and XP → 0 (history kept, CSV works)
+ * - Auto weekly reset at local Monday 00:00 via isoWeekKey
+ * - Focus timer awards via onTimerComplete (mobile-safe)
  */
 
 /* -------------------- UI class helpers -------------------- */
@@ -30,29 +28,32 @@ const TAB_BTN =
   "dark:bg-gray-800 dark:text-gray-100 dark:border-gray-600";
 
 /* -------------------- Utilities -------------------- */
-const todayISO = () => new Date().toISOString().slice(0, 10);
+const todayISO = () => {
+  const d = new Date();
+  // local yyyy-mm-dd
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+};
 const clamp = (n, min, max) => Math.max(min, Math.min(max, n));
 const uid = () => Math.random().toString(36).slice(2, 9);
 const xpForLevel = (level) => 100 + (level - 1) * 75;
 function safeJSONParse(str, fallback) { try { return JSON.parse(str); } catch { return fallback; } }
 
-/** ISO week key like "2025-W09" (Monday-based weeks) */
+/** Local-time ISO week key like "2025-W09" (Mon-based) */
 function isoWeekKey(d = new Date()) {
-  const date = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
-  const dayNum = (date.getUTCDay() + 6) % 7;          // Mon=0..Sun=6
-  date.setUTCDate(date.getUTCDate() - dayNum + 3);    // Thursday in current week
-  const week1 = new Date(Date.UTC(date.getUTCFullYear(), 0, 4));
+  // Work with local midnight to avoid TZ jumps
+  const date = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  const dayNum = (date.getDay() + 6) % 7;             // Mon=0..Sun=6
+  date.setDate(date.getDate() - dayNum + 3);          // Thu of this week
+  const week1 = new Date(date.getFullYear(), 0, 4);   // Jan 4th
   const weekNo = 1 + Math.round(
-    ((date - week1) / 86400000 - 3 + ((week1.getUTCDay() + 6) % 7)) / 7
+    ((date - week1) / 86400000 - 3 + ((week1.getDay() + 6) % 7)) / 7
   );
-  const year = date.getUTCFullYear();
+  const year = date.getFullYear();
   return `${year}-W${String(weekNo).padStart(2, "0")}`;
 }
-
-/* --- Weekly reset configuration --- */
-const RESET_LEVEL_AT_WEEK_START = true; // set false to disable
-const WEEKLY_RESET_LEVEL = 1;           // set to 0 if you prefer "Level 0"
-const WEEKLY_RESET_XP = 0;              // XP progress resets with level
 
 /* -------------------- Defaults -------------------- */
 const defaultQuests = [
@@ -74,12 +75,17 @@ const defaultSettings = {
   theme: "system", // light | dark | system
 };
 
-const STORAGE_VERSION = 2;
+const STORAGE_VERSION = 3;
+
+/* -------------------- Weekly reset constants -------------------- */
+const WEEKLY_RESET_LEVEL = 1;
+const WEEKLY_RESET_XP = 0;
 
 /* -------------------- Fresh person state -------------------- */
 const makeFreshState = (name = "") => ({
   __version: STORAGE_VERSION,
   name,
+  weekKey: isoWeekKey(new Date()), // track which week stats are for
   settings: { ...defaultSettings },
   quests: defaultQuests,
   history: [], // {id,date,questId,title,category,points,emoji,timestamp}
@@ -87,7 +93,6 @@ const makeFreshState = (name = "") => ({
   level: 1,
   streak: 0,
   lastGoalDate: null,
-  weekKey: isoWeekKey(), // used for weekly level reset
 });
 
 /* -------------------- Local Storage (multi-user) -------------------- */
@@ -115,7 +120,7 @@ function migrateState(parsed, person) {
     name: person,
     settings,
     quests,
-    weekKey: parsed.weekKey || base.weekKey, // ensure present for weekly reset
+    weekKey: parsed.weekKey || base.weekKey,
   };
 }
 function loadPersonState(person) {
@@ -167,7 +172,7 @@ function Header({ level, xp, nextXP, onReset, theme, setTheme, onExportAllCSV })
         </div>
 
         <button onClick={onExportAllCSV} className={BTN}>Export All CSV</button>
-        <button onClick={onReset} className={BTN}>Reset</button>
+        <button onClick={onReset} className={BTN}>Weekly Reset</button>
 
         <select
           value={theme}
@@ -246,7 +251,7 @@ function DailyProgress({ historyToday, dailyGoal, onSetGoal }) {
   };
 
   const total = historyToday.reduce((s, h) => s + h.points, 0);
-  const denom = Math.max(1, dailyGoal);
+  const denom = Math.max(1, dailyGoal); // avoid /0
   const pct = clamp(Math.round((total / denom) * 100), 0, 100);
 
   return (
@@ -402,12 +407,14 @@ function Timer({ settings, onTimerComplete }) {
   const [running, setRunning] = useState(false);
   const notifRef = useRef(null);
 
+  // tick
   useEffect(() => {
     let t;
     if (running) t = setInterval(() => setSeconds(s => Math.max(0, s-1)), 1000);
     return () => clearInterval(t);
   }, [running]);
 
+  // expiry
   useEffect(() => {
     if (seconds !== 0) return;
     if (running) setRunning(false);
@@ -510,12 +517,13 @@ function Leaderboard({ profiles }) {
 
 /* -------------------- MAIN APP -------------------- */
 export default function App() {
+  // Multi-user wiring
   const [profiles, setProfiles] = useState(loadProfiles());
   const [person, setPerson] = useState(profiles[0] || "");
   const [state, setState] = useState(() => loadPersonState(person));
-  const [undoStack, setUndoStack] = useState([]); // kept for future use
+  const [undoStack, setUndoStack] = useState([]);
 
-  // Theme application
+  // Apply effective theme + watch OS changes when using "system"
   useEffect(() => {
     const apply = () => {
       const eff = effectiveTheme(state.settings.theme);
@@ -537,19 +545,26 @@ export default function App() {
   useEffect(() => { if (person) setState(loadPersonState(person)); }, [person]);
   useEffect(() => { if (person) savePersonState(person, state); }, [person, state]);
 
-  // Weekly level reset
-  useEffect(() => {
-    if (!RESET_LEVEL_AT_WEEK_START || !person) return;
-    const nowKey = isoWeekKey(new Date());
-    if (state.weekKey !== nowKey) {
-      setState(s => ({ ...s, level: WEEKLY_RESET_LEVEL, xp: WEEKLY_RESET_XP, weekKey: nowKey }));
-    }
-  }, [person, state.weekKey]);
-
   const { settings, quests, history, xp, level, streak, lastGoalDate } = state;
   const dateToday = todayISO();
   const historyToday = useMemo(() => history.filter(h => h.date === dateToday).sort((a,b)=>b.timestamp-a.timestamp), [history, dateToday]);
   const nextXP = useMemo(() => xpForLevel(level), [level]);
+
+  // ---- WEEKLY AUTO RESET (local time) ----
+  useEffect(() => {
+    const checkWeek = () => {
+      const nowKey = isoWeekKey(new Date());
+      setState(s => {
+        if (s.weekKey !== nowKey) {
+          return { ...s, level: WEEKLY_RESET_LEVEL, xp: WEEKLY_RESET_XP, weekKey: nowKey };
+        }
+        return s;
+      });
+    };
+    checkWeek();
+    const id = setInterval(checkWeek, 15 * 60 * 1000); // every 15 min
+    return () => clearInterval(id);
+  }, [person]);
 
   // Central entry add (used by quests + timer)
   const addEntry = async ({ title, category, points, emoji, questId=null }) => {
@@ -595,6 +610,7 @@ export default function App() {
     const next = { ...state, history: newHistory, xp: newXP, level: newLevel, streak: newStreak, lastGoalDate: newLastGoalDate, name: person };
     setState(next);
 
+    // push to undo stack (kept for future Undo if you want)
     setUndoStack((st)=>[{ entry, prev }, ...st].slice(0, 25));
 
     // Save to Google Sheet (central)
@@ -612,7 +628,6 @@ export default function App() {
     }
   };
 
-  // Complete quest
   const completeQuest = (q) => addEntry({ title: q.title, category: q.category, points: q.points, emoji: q.emoji, questId: q.id });
 
   // Quests CRUD
@@ -626,12 +641,14 @@ export default function App() {
     setState(s => ({ ...s, settings: { ...s.settings, dailyGoal: n }}));
   };
 
-  // Reset & exports
-  const doReset = () => {
+  // ---- SOFT WEEKLY RESET BUTTON ----
+  const doWeeklyReset = () => {
     if (!person) return alert("Select a person first.");
-    if (confirm(`Reset all data for ${person}?`)) setState(makeFreshState(person));
+    const wk = isoWeekKey(new Date());
+    setState(s => ({ ...s, level: WEEKLY_RESET_LEVEL, xp: WEEKLY_RESET_XP, weekKey: wk }));
   };
 
+  // CSV exports (keep history intact so this always works)
   const exportCSV = () => {
     if (!person) return alert("Select a person first.");
     const rows = [
@@ -648,7 +665,7 @@ export default function App() {
 
   function exportAllProfilesCSV() {
     const profs = loadProfiles();
-    const rows = [["person","date","time","title","category","points","level","streak"]]];
+    const rows = [["person","date","time","title","category","points","level","streak"]];
     for (const p of profs) {
       const s = loadPersonState(p);
       for (const h of s.history || []) {
@@ -694,7 +711,7 @@ export default function App() {
             level={level}
             xp={xp % nextXP}
             nextXP={nextXP}
-            onReset={doReset}
+            onReset={doWeeklyReset}
             theme={state.settings.theme}
             setTheme={(t)=>setState(s=>({...s, settings:{...s.settings, theme:t}}))}
             onExportAllCSV={exportAllProfilesCSV}
@@ -716,7 +733,7 @@ export default function App() {
             {/* Tabs & New quest */}
             <div className="flex flex-wrap gap-2">
               {categories.map(c => (
-                <button key={c} onClick={()=>setTab(c)} className={TAB_BTN + (tab===c?' !bg-black !text-white dark:!bg-white dark:!text-black':'')}>
+                <button key={c} onClick={()=>setTab(c)} className={TAB_BTN + (tab===c?' !bg-black !text-white dark:!bg-white dark:!text-black':'')} >
                   {c}
                 </button>
               ))}
@@ -762,7 +779,7 @@ export default function App() {
           </div>
         </div>
 
-        <footer className="text-xs opacity-60 mt-10">Multi-user • Local leaderboard • Per-person Export CSV • Export All Profiles</footer>
+        <footer className="text-xs opacity-60 mt-10">Multi-user • Weekly reset keeps history • Local leaderboard • CSV export</footer>
       </div>
     </div>
   );
