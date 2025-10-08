@@ -3,10 +3,9 @@ import { saveActivityToSheet } from "./cloud";
 
 /**
  * Sales & Marketing Productivity Game (mobile-optimized)
- * - Focus timer: sound + modal popup at 0 (Chrome desktop/mobile safe)
- * - WebAudio unlocked on first user interaction
- * - Weekly reset (local Monday): Level->1, XP->0, history intact
- * - Daily progress auto-resets with local date
+ * - Soft Weekly Reset: only Level → 1 and XP → 0 (history kept, CSV works)
+ * - Auto weekly reset at local Monday 00:00 via isoWeekKey
+ * - Focus timer with repeating alarm + in-app modal + notifications
  */
 
 /* -------------------- UI class helpers -------------------- */
@@ -44,15 +43,68 @@ function safeJSONParse(str, fallback) { try { return JSON.parse(str); } catch { 
 /** Local-time ISO week key like "2025-W09" (Mon-based) */
 function isoWeekKey(d = new Date()) {
   const date = new Date(d.getFullYear(), d.getMonth(), d.getDate());
-  const dayNum = (date.getDay() + 6) % 7; // Mon=0..Sun=6
-  date.setDate(date.getDate() - dayNum + 3); // Thu of this week
-  const week1 = new Date(date.getFullYear(), 0, 4);
+  const dayNum = (date.getDay() + 6) % 7;             // Mon=0..Sun=6
+  date.setDate(date.getDate() - dayNum + 3);          // Thu of this week
+  const week1 = new Date(date.getFullYear(), 0, 4);   // Jan 4th
   const weekNo = 1 + Math.round(
     ((date - week1) / 86400000 - 3 + ((week1.getDay() + 6) % 7)) / 7
   );
   const year = date.getFullYear();
   return `${year}-W${String(weekNo).padStart(2, "0")}`;
 }
+
+/* -------------------- Simple WebAudio beeper (mobile-friendly) -------------------- */
+const audioEngine = (() => {
+  let ctx = null;
+  let unlocked = false;
+
+  function getCtx() {
+    if (!ctx) {
+      try { ctx = new (window.AudioContext || window.webkitAudioContext)(); }
+      catch { ctx = null; }
+    }
+    return ctx;
+  }
+
+  // must be called once from a user gesture to allow audio in mobile browsers
+  function attachUnlockOnce() {
+    const tryUnlock = () => {
+      const c = getCtx();
+      if (!c) return;
+      const src = c.createBufferSource();
+      src.buffer = c.createBuffer(1, 1, 22050);
+      src.connect(c.destination);
+      try { src.start(0); } catch {}
+      if (c.state === "suspended") { c.resume().catch(()=>{}); }
+      unlocked = true;
+      window.removeEventListener("pointerdown", tryUnlock);
+      window.removeEventListener("keydown", tryUnlock);
+      window.removeEventListener("touchstart", tryUnlock);
+    };
+    window.addEventListener("pointerdown", tryUnlock, { once: true });
+    window.addEventListener("keydown", tryUnlock, { once: true });
+    window.addEventListener("touchstart", tryUnlock, { once: true });
+  }
+
+  function beep(freq = 660, durationMs = 900, type = "sine") {
+    const c = getCtx();
+    if (!c) return;
+    if (!unlocked && c.state === "suspended") { try { c.resume(); } catch {} }
+    const o = c.createOscillator();
+    const g = c.createGain();
+    o.type = type;
+    o.frequency.setValueAtTime(freq, c.currentTime);
+    g.gain.setValueAtTime(0.001, c.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.4, c.currentTime + 0.02);
+    g.gain.exponentialRampToValueAtTime(0.0001, c.currentTime + durationMs / 1000);
+    o.connect(g);
+    g.connect(c.destination);
+    try { o.start(); } catch {}
+    try { o.stop(c.currentTime + durationMs / 1000 + 0.05); } catch {}
+  }
+
+  return { attachUnlockOnce, beep };
+})();
 
 /* -------------------- Defaults -------------------- */
 const defaultQuests = [
@@ -84,7 +136,7 @@ const WEEKLY_RESET_XP = 0;
 const makeFreshState = (name = "") => ({
   __version: STORAGE_VERSION,
   name,
-  weekKey: isoWeekKey(new Date()),
+  weekKey: isoWeekKey(new Date()), // track which week stats are for
   settings: { ...defaultSettings },
   quests: defaultQuests,
   history: [], // {id,date,questId,title,category,points,emoji,timestamp}
@@ -142,56 +194,6 @@ function effectiveTheme(themeSetting) {
   const prefersDark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
   return prefersDark ? "dark" : "light";
 }
-
-/* -------------------- WebAudio engine (unlocked) -------------------- */
-const audioEngine = (() => {
-  let ctx = null;
-  let unlocked = false;
-
-  function ensureContext() {
-    if (!ctx) {
-      const AC = window.AudioContext || window.webkitAudioContext;
-      if (!AC) return null;
-      ctx = new AC();
-    }
-    return ctx;
-  }
-
-  function unlock() {
-    const c = ensureContext();
-    if (!c || unlocked) return;
-    const o = c.createOscillator();
-    const g = c.createGain();
-    g.gain.value = 0.0001;
-    o.connect(g).connect(c.destination);
-    o.start(0);
-    o.stop(0.01);
-    c.resume?.();
-    unlocked = true;
-  }
-
-  function attachUnlockOnce() {
-    const handler = () => { unlock(); window.removeEventListener("pointerdown", handler, true); };
-    window.addEventListener("pointerdown", handler, true);
-  }
-
-  function beep(durationMs = 600, freq = 880, type = "sine") {
-    const c = ensureContext();
-    if (!c) return;
-    const o = c.createOscillator();
-    const g = c.createGain();
-    o.type = type;
-    o.frequency.value = freq;
-    o.connect(g).connect(c.destination);
-    g.gain.setValueAtTime(0.001, c.currentTime);
-    g.gain.exponentialRampToValueAtTime(0.3, c.currentTime + 0.02);
-    g.gain.exponentialRampToValueAtTime(0.0001, c.currentTime + durationMs / 1000);
-    o.start();
-    o.stop(c.currentTime + durationMs / 1000 + 0.05);
-  }
-
-  return { attachUnlockOnce, beep };
-})();
 
 /* -------------------- Header -------------------- */
 function Header({ level, xp, nextXP, onReset, theme, setTheme, onExportAllCSV }) {
@@ -300,7 +302,7 @@ function DailyProgress({ historyToday, dailyGoal, onSetGoal }) {
   };
 
   const total = historyToday.reduce((s, h) => s + h.points, 0);
-  const denom = Math.max(1, dailyGoal);
+  const denom = Math.max(1, dailyGoal); // avoid /0
   const pct = clamp(Math.round((total / denom) * 100), 0, 100);
 
   return (
@@ -330,7 +332,7 @@ function DailyProgress({ historyToday, dailyGoal, onSetGoal }) {
   );
 }
 
-/* -------------------- Quests -------------------- */
+/* -------------------- Quest -------------------- */
 function QuestCard({ quest, onComplete, onEdit, onDelete }) {
   return (
     <div className="p-4 rounded-2xl border shadow-sm bg-white/70 dark:bg-gray-900/70 border-gray-200 dark:border-gray-700 flex flex-col gap-3">
@@ -449,7 +451,7 @@ function Badges({ allHistory, level, dailyGoal }) {
   );
 }
 
-/* -------------------- Timer -------------------- */
+/* -------------------- Timer (with repeating alarm) -------------------- */
 function Timer({ settings, onTimerComplete }) {
   const [mode, setMode] = useState('work'); // work | short | long
   const [seconds, setSeconds] = useState(settings.pomodoroMinutes * 60);
@@ -458,6 +460,10 @@ function Timer({ settings, onTimerComplete }) {
   // in-app modal
   const [showModal, setShowModal] = useState(false);
   const [modalText, setModalText] = useState({ title: "", body: "" });
+
+  // alarm refs
+  const alarmIntervalRef = useRef(null);
+  const alarmTimeoutRef = useRef(null);
 
   // Unlock WebAudio on first interaction
   useEffect(() => {
@@ -469,6 +475,33 @@ function Timer({ settings, onTimerComplete }) {
     if (!("Notification" in window)) return;
     if (Notification.permission === "default") {
       Notification.requestPermission().catch(() => {});
+    }
+  };
+
+  // helper: start/stop repeating alarm
+  const startAlarm = () => {
+    stopAlarm(); // safety
+    // Beep immediately, then every 2s; stop after 35s automatically.
+    audioEngine.beep(650, 900, "sine");
+    if (navigator.vibrate) { try { navigator.vibrate([200, 100, 200]); } catch {} }
+
+    alarmIntervalRef.current = setInterval(() => {
+      audioEngine.beep(650, 900, "sine");
+      if (navigator.vibrate) { try { navigator.vibrate([200, 100, 200]); } catch {} }
+    }, 2000);
+
+    alarmTimeoutRef.current = setTimeout(() => {
+      stopAlarm();
+    }, 35000); // 35 seconds hard stop
+  };
+  const stopAlarm = () => {
+    if (alarmIntervalRef.current) {
+      clearInterval(alarmIntervalRef.current);
+      alarmIntervalRef.current = null;
+    }
+    if (alarmTimeoutRef.current) {
+      clearTimeout(alarmTimeoutRef.current);
+      alarmTimeoutRef.current = null;
     }
   };
 
@@ -484,11 +517,8 @@ function Timer({ settings, onTimerComplete }) {
     if (seconds !== 0) return;
     if (running) setRunning(false);
 
-    // Sound: reliable beep via WebAudio
-    audioEngine.beep(650, 900, "sine");
-
-    // Vibration (best-effort)
-    if (navigator.vibrate) { try { navigator.vibrate([160, 80, 160]); } catch {} }
+    // Start repeating alarm
+    startAlarm();
 
     // System notification (if allowed)
     const title = mode === 'work' ? "Work block done" : mode === 'short' ? "Short break over" : "Long break over";
@@ -496,9 +526,7 @@ function Timer({ settings, onTimerComplete }) {
     if ("Notification" in window && Notification.permission === "granted") {
       try {
         const n = new Notification(title, { body });
-        n.onclick = () => {
-          try { window.focus(); } catch {}
-        };
+        n.onclick = () => { try { window.focus(); } catch {} };
       } catch {}
     }
 
@@ -509,11 +537,16 @@ function Timer({ settings, onTimerComplete }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [seconds]);
 
+  // cleanup alarms if component unmounts
+  useEffect(() => () => stopAlarm(), []);
+
   const resetTo = (m) => {
     setMode(m);
-    const mins = m==='work'? settings.pomodoroMinutes : m==='short'? settings.shortBreakMinutes : settings.longBreakMinutes;
+    const mins = m==='work'? settings.pomodoroMinutes : m==='short'? settings.shortBreakMinutes : m==='long'? settings.longBreakMinutes : settings.pomodoroMinutes;
     setSeconds(mins*60);
     setRunning(false);
+    stopAlarm();
+    setShowModal(false);
   };
 
   const startPause = () => {
@@ -525,6 +558,7 @@ function Timer({ settings, onTimerComplete }) {
   const ss = String(seconds%60).padStart(2,'0');
 
   const logPointsNow = () => {
+    stopAlarm();
     setShowModal(false);
     onTimerComplete(mode);
   };
@@ -550,7 +584,7 @@ function Timer({ settings, onTimerComplete }) {
             <h4 className="text-lg font-semibold mb-2">{modalText.title}</h4>
             <p className="opacity-80 mb-4">{modalText.body}</p>
             <div className="flex gap-2 justify-end">
-              <button className={BTN} onClick={() => setShowModal(false)}>Dismiss</button>
+              <button className={BTN} onClick={() => { stopAlarm(); setShowModal(false); }}>Dismiss</button>
               <button className="px-3 py-2 rounded-xl bg-black text-white dark:bg-white dark:text-black" onClick={logPointsNow}>
                 Log points
               </button>
@@ -659,7 +693,7 @@ export default function App() {
       });
     };
     checkWeek();
-    const id = setInterval(checkWeek, 15 * 60 * 1000);
+    const id = setInterval(checkWeek, 15 * 60 * 1000); // every 15 min
     return () => clearInterval(id);
   }, [person]);
 
@@ -707,7 +741,7 @@ export default function App() {
     const next = { ...state, history: newHistory, xp: newXP, level: newLevel, streak: newStreak, lastGoalDate: newLastGoalDate, name: person };
     setState(next);
 
-    // push to undo stack (kept for future undo)
+    // push to undo stack (kept for future Undo if you want)
     setUndoStack((st)=>[{ entry, prev }, ...st].slice(0, 25));
 
     // Save to Google Sheet (central)
@@ -745,7 +779,7 @@ export default function App() {
     setState(s => ({ ...s, level: WEEKLY_RESET_LEVEL, xp: WEEKLY_RESET_XP, weekKey: wk }));
   };
 
-  // CSV exports (history intact so export always works)
+  // CSV exports (keep history intact so this always works)
   const exportCSV = () => {
     if (!person) return alert("Select a person first.");
     const rows = [
@@ -862,7 +896,6 @@ export default function App() {
           <div className="space-y-6">
             <Stats allHistory={history} streak={streak} level={level} />
             <Badges allHistory={history} level={level} dailyGoal={settings.dailyGoal} />
-            {/* Focus Timer stays here */}
             <Timer settings={settings} onTimerComplete={handleTimerComplete} />
 
             <div className="p-4 rounded-2xl border shadow-sm bg-white/60 dark:bg-gray-900/60 border-gray-200 dark:border-gray-700">
