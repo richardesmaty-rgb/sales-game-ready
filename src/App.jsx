@@ -3,9 +3,10 @@ import { saveActivityToSheet } from "./cloud";
 
 /**
  * Sales & Marketing Productivity Game (mobile-optimized)
- * - Soft Weekly Reset: only Level → 1 and XP → 0 (history kept, CSV works)
- * - Auto weekly reset at local Monday 00:00 via isoWeekKey
- * - Focus timer: chime + popup + (optional) web notification + vibration at 0
+ * - Focus timer: sound + modal popup at 0 (Chrome desktop/mobile safe)
+ * - WebAudio unlocked on first user interaction
+ * - Weekly reset (local Monday): Level->1, XP->0, history intact
+ * - Daily progress auto-resets with local date
  */
 
 /* -------------------- UI class helpers -------------------- */
@@ -43,9 +44,9 @@ function safeJSONParse(str, fallback) { try { return JSON.parse(str); } catch { 
 /** Local-time ISO week key like "2025-W09" (Mon-based) */
 function isoWeekKey(d = new Date()) {
   const date = new Date(d.getFullYear(), d.getMonth(), d.getDate());
-  const dayNum = (date.getDay() + 6) % 7;             // Mon=0..Sun=6
-  date.setDate(date.getDate() - dayNum + 3);          // Thu of this week
-  const week1 = new Date(date.getFullYear(), 0, 4);   // Jan 4th
+  const dayNum = (date.getDay() + 6) % 7; // Mon=0..Sun=6
+  date.setDate(date.getDate() - dayNum + 3); // Thu of this week
+  const week1 = new Date(date.getFullYear(), 0, 4);
   const weekNo = 1 + Math.round(
     ((date - week1) / 86400000 - 3 + ((week1.getDay() + 6) % 7)) / 7
   );
@@ -141,6 +142,56 @@ function effectiveTheme(themeSetting) {
   const prefersDark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
   return prefersDark ? "dark" : "light";
 }
+
+/* -------------------- WebAudio engine (unlocked) -------------------- */
+const audioEngine = (() => {
+  let ctx = null;
+  let unlocked = false;
+
+  function ensureContext() {
+    if (!ctx) {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return null;
+      ctx = new AC();
+    }
+    return ctx;
+  }
+
+  function unlock() {
+    const c = ensureContext();
+    if (!c || unlocked) return;
+    const o = c.createOscillator();
+    const g = c.createGain();
+    g.gain.value = 0.0001;
+    o.connect(g).connect(c.destination);
+    o.start(0);
+    o.stop(0.01);
+    c.resume?.();
+    unlocked = true;
+  }
+
+  function attachUnlockOnce() {
+    const handler = () => { unlock(); window.removeEventListener("pointerdown", handler, true); };
+    window.addEventListener("pointerdown", handler, true);
+  }
+
+  function beep(durationMs = 600, freq = 880, type = "sine") {
+    const c = ensureContext();
+    if (!c) return;
+    const o = c.createOscillator();
+    const g = c.createGain();
+    o.type = type;
+    o.frequency.value = freq;
+    o.connect(g).connect(c.destination);
+    g.gain.setValueAtTime(0.001, c.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.3, c.currentTime + 0.02);
+    g.gain.exponentialRampToValueAtTime(0.0001, c.currentTime + durationMs / 1000);
+    o.start();
+    o.stop(c.currentTime + durationMs / 1000 + 0.05);
+  }
+
+  return { attachUnlockOnce, beep };
+})();
 
 /* -------------------- Header -------------------- */
 function Header({ level, xp, nextXP, onReset, theme, setTheme, onExportAllCSV }) {
@@ -249,7 +300,7 @@ function DailyProgress({ historyToday, dailyGoal, onSetGoal }) {
   };
 
   const total = historyToday.reduce((s, h) => s + h.points, 0);
-  const denom = Math.max(1, dailyGoal); // avoid /0
+  const denom = Math.max(1, dailyGoal);
   const pct = clamp(Math.round((total / denom) * 100), 0, 100);
 
   return (
@@ -404,19 +455,20 @@ function Timer({ settings, onTimerComplete }) {
   const [seconds, setSeconds] = useState(settings.pomodoroMinutes * 60);
   const [running, setRunning] = useState(false);
 
-  // local popup state
-  const [doneOpen, setDoneOpen] = useState(false);
-  const [doneTitle, setDoneTitle] = useState("");
+  // in-app modal
+  const [showModal, setShowModal] = useState(false);
+  const [modalText, setModalText] = useState({ title: "", body: "" });
 
-  // tiny chime element (works on iOS once user has interacted)
-  const chimeRef = useRef(null);
-  // One-time "sound unlocked" flag after any click
-  const soundUnlockedRef = useRef(false);
+  // Unlock WebAudio on first interaction
+  useEffect(() => {
+    audioEngine.attachUnlockOnce();
+  }, []);
 
-  // ask for notification permission once the user interacts
-  const requestNotification = () => {
-    if ("Notification" in window && Notification.permission === "default") {
-      try { Notification.requestPermission(); } catch {}
+  // Request Notification permission lazily when user starts timer
+  const requestNotifyIfNeeded = () => {
+    if (!("Notification" in window)) return;
+    if (Notification.permission === "default") {
+      Notification.requestPermission().catch(() => {});
     }
   };
 
@@ -427,34 +479,33 @@ function Timer({ settings, onTimerComplete }) {
     return () => clearInterval(t);
   }, [running]);
 
-  // expiry → play chime + vibrate + optional web notification + popup
+  // expiry
   useEffect(() => {
     if (seconds !== 0) return;
     if (running) setRunning(false);
 
-    // Build title/body
+    // Sound: reliable beep via WebAudio
+    audioEngine.beep(650, 900, "sine");
+
+    // Vibration (best-effort)
+    if (navigator.vibrate) { try { navigator.vibrate([160, 80, 160]); } catch {} }
+
+    // System notification (if allowed)
     const title = mode === 'work' ? "Work block done" : mode === 'short' ? "Short break over" : "Long break over";
-    setDoneTitle(title);
-    setDoneOpen(true);
-
-    // Play chime if unlocked by user interaction
-    try {
-      if (chimeRef.current && soundUnlockedRef.current) {
-        chimeRef.current.currentTime = 0;
-        chimeRef.current.play().catch(()=>{});
-      }
-    } catch {}
-
-    // Vibration (mobile friendly)
-    if (navigator.vibrate) { try { navigator.vibrate([120, 40, 120]); } catch {} }
-
-    // Web notification (if already granted)
+    const body = "Nice work! Tap to log your points.";
     if ("Notification" in window && Notification.permission === "granted") {
-      try { new Notification(title, { body: "Nice! Logging points now." }); } catch {}
+      try {
+        const n = new Notification(title, { body });
+        n.onclick = () => {
+          try { window.focus(); } catch {}
+        };
+      } catch {}
     }
 
-    // NOTE: we do NOT add points here; we add when user taps the popup button.
-    // This avoids surprises if the app is in background.
+    // In-app modal
+    setModalText({ title, body: "Nice work! Tap below to log your points." });
+    setShowModal(true);
+
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [seconds]);
 
@@ -465,33 +516,21 @@ function Timer({ settings, onTimerComplete }) {
     setRunning(false);
   };
 
-  // start/pause with enabling sound + notification on first interaction
-  const toggleStart = () => {
-    // mark that user interacted → audio allowed
-    soundUnlockedRef.current = true;
-    requestNotification();
+  const startPause = () => {
+    requestNotifyIfNeeded();
     setRunning(r => !r);
-  };
-
-  // confirm popup → award points + reset timer for same mode
-  const confirmDone = () => {
-    setDoneOpen(false);
-    onTimerComplete(mode); // add points
-    resetTo(mode);         // ready for next block
   };
 
   const mm = String(Math.floor(seconds/60)).padStart(2,'0');
   const ss = String(seconds%60).padStart(2,'0');
 
-  return (
-    <div className="p-4 rounded-2xl border shadow-sm bg-white/60 dark:bg-gray-900/60 border-gray-200 dark:border-gray-700 relative">
-      {/* hidden audio element for chime */}
-      <audio
-        ref={chimeRef}
-        preload="auto"
-        src="data:audio/mp3;base64,//uQxAAAAAAAAAAAAAAAAAAAAAAAWGluZwAAAA8AAAACAAACcQAAACAAACFdAAACAAACAAACAAAAGmF1ZGlvZGF0YQAAAAA////////////////////////////8AAAAPAAAADwAAABkAAB8AAP//AACf//8AAP//AACf//8AAP//AACf//8A"
-      />
+  const logPointsNow = () => {
+    setShowModal(false);
+    onTimerComplete(mode);
+  };
 
+  return (
+    <div className="p-4 rounded-2xl border shadow-sm bg-white/60 dark:bg-gray-900/60 border-gray-200 dark:border-gray-700">
       <h3 className="font-semibold mb-2">Focus Timer</h3>
       <div className="flex gap-2 mb-3">
         <button onClick={()=>resetTo('work')} className={`${BTN} ${mode==='work'?'!bg-black !text-white dark:!bg-white dark:!text-black':''}`}>Work</button>
@@ -500,19 +539,19 @@ function Timer({ settings, onTimerComplete }) {
       </div>
       <div className="text-4xl font-bold text-center mb-3">{mm}:{ss}</div>
       <div className="flex gap-2 justify-center">
-        <button onClick={toggleStart} className={BTN}>{running? 'Pause' : 'Start'}</button>
+        <button onClick={startPause} className={BTN}>{running? 'Pause' : 'Start'}</button>
         <button onClick={()=>resetTo(mode)} className={BTN}>Reset</button>
       </div>
 
-      {/* simple popup/modal */}
-      {doneOpen && (
-        <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/50 p-4">
-          <div className="w-full max-w-sm rounded-2xl border bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 p-4 shadow-xl">
-            <div className="text-lg font-semibold mb-1">{doneTitle}</div>
-            <div className="text-sm opacity-80 mb-4">Nice work! Tap below to log your points.</div>
+      {/* In-app modal */}
+      {showModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+          <div className="w-full max-w-md rounded-2xl bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 p-5 shadow-xl">
+            <h4 className="text-lg font-semibold mb-2">{modalText.title}</h4>
+            <p className="opacity-80 mb-4">{modalText.body}</p>
             <div className="flex gap-2 justify-end">
-              <button className={BTN} onClick={()=>setDoneOpen(false)}>Dismiss</button>
-              <button className="px-3 py-2 rounded-xl bg-black text-white dark:bg-white dark:text-black" onClick={confirmDone}>
+              <button className={BTN} onClick={() => setShowModal(false)}>Dismiss</button>
+              <button className="px-3 py-2 rounded-xl bg-black text-white dark:bg-white dark:text-black" onClick={logPointsNow}>
                 Log points
               </button>
             </div>
@@ -620,7 +659,7 @@ export default function App() {
       });
     };
     checkWeek();
-    const id = setInterval(checkWeek, 15 * 60 * 1000); // every 15 min
+    const id = setInterval(checkWeek, 15 * 60 * 1000);
     return () => clearInterval(id);
   }, [person]);
 
@@ -668,7 +707,7 @@ export default function App() {
     const next = { ...state, history: newHistory, xp: newXP, level: newLevel, streak: newStreak, lastGoalDate: newLastGoalDate, name: person };
     setState(next);
 
-    // push to undo stack (kept for future Undo if you want)
+    // push to undo stack (kept for future undo)
     setUndoStack((st)=>[{ entry, prev }, ...st].slice(0, 25));
 
     // Save to Google Sheet (central)
@@ -706,7 +745,7 @@ export default function App() {
     setState(s => ({ ...s, level: WEEKLY_RESET_LEVEL, xp: WEEKLY_RESET_XP, weekKey: wk }));
   };
 
-  // CSV exports (keep history intact so this always works)
+  // CSV exports (history intact so export always works)
   const exportCSV = () => {
     if (!person) return alert("Select a person first.");
     const rows = [
@@ -786,7 +825,7 @@ export default function App() {
         <div className="grid md:grid-cols-3 gap-6 mt-6">
           {/* LEFT: Game panel */}
           <div className="md:col-span-2 space-y-6">
-            <DailyProgress historyToday={historyToday} dailyGoal={state.settings.dailyGoal} onSetGoal={setDailyGoal} />
+            <DailyProgress historyToday={historyToday} dailyGoal={settings.dailyGoal} onSetGoal={setDailyGoal} />
 
             {/* Tabs & New quest */}
             <div className="flex flex-wrap gap-2">
@@ -822,8 +861,9 @@ export default function App() {
           {/* RIGHT: Stats / Badges / Timer / Tips */}
           <div className="space-y-6">
             <Stats allHistory={history} streak={streak} level={level} />
-            <Badges allHistory={history} level={level} dailyGoal={state.settings.dailyGoal} />
-            <Timer settings={state.settings} onTimerComplete={handleTimerComplete} />
+            <Badges allHistory={history} level={level} dailyGoal={settings.dailyGoal} />
+            {/* Focus Timer stays here */}
+            <Timer settings={settings} onTimerComplete={handleTimerComplete} />
 
             <div className="p-4 rounded-2xl border shadow-sm bg-white/60 dark:bg-gray-900/60 border-gray-200 dark:border-gray-700">
               <h3 className="font-semibold mb-2">Tips</h3>
